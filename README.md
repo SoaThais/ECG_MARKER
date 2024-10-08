@@ -54,7 +54,7 @@ git config --global user.email "your_email@example.com"
 6. Clone the repository and navigate to the project directory:
 
 ```bash
-git clone https://github.com/SoaThais/ECG_MARKER.git
+git clone git@github.com:SoaThais/ECG_MARKER.git
 ```
 
 ```bash
