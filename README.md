@@ -61,7 +61,7 @@ git clone git@github.com:SoaThais/ECG_MARKER.git
 cd ECG_MARKER/
 ```
 
-5. Create a Conda environment with the project dependencies
+7. Create a Conda environment with the project dependencies
 
 ```bash
 conda env create -f environment.yml
