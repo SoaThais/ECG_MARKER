@@ -75,6 +75,12 @@ conda env create -f environment.yml
 conda activate ecg_marker_env
 ```
 
+2. Install the library 
+
+```bash
+conda install -c conda-forge libxcb
+```
+
 2. Run the program
 
 ```bash
