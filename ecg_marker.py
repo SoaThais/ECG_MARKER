@@ -6,6 +6,7 @@ import matplotlib.widgets as widgets
 import numpy as np
 import argparse
 import os
+import neurokit2 as nk
 
 head_file = ['I', 'II', 'III', 'AVR', 'AVL', 'AVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6', 'HISp', 'HISd', 'VD p', 'VD 78', 'VD 56', 'VD 34', 'VD d']
 head      = ['VD d', 'I', 'II', 'III', 'AVR', 'AVL', 'AVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6']
@@ -106,6 +107,187 @@ def onclick(event):
             ax.axvline(event.xdata, color = 'b', linestyle = '--', label = 'vertical_line_2', linewidth = 1)
             fig.canvas.draw()
             message_label.config(text = "Press 'F' to add Period, 'R' to add QRS, 'T' to add QT, 'E' to add extrasystole, 'A' to add arrhythmia or 'C' to cancel.")
+
+def automatic_period_marking():
+
+    signals = select_electrodes()
+
+    message_label.config(text = "Making Automatic Markings...")
+    message_label.update_idletasks()
+
+    electrodes_ecg_r_peaks   = []
+    electrodes_ecg_r_onsets  = []
+    electrodes_ecg_r_offsets = []
+    electrodes_ecg_t_offsets = []
+
+    max_len = 0
+
+    for electrode in signals:
+        print(f'Electrode: {electrode}')
+
+        signal = electrodes[electrode]['values']
+
+        if (clean_signal):
+            signal = nk.ecg_clean(signal)
+
+        _, rpeaks = nk.ecg_peaks(signal)
+
+        ecg_r_peaks = rpeaks['ECG_R_Peaks']
+
+        signal_cwt, waves_cwt = nk.ecg_delineate(signal, rpeaks, method="cwt", show=True)
+
+        ecg_r_onsets  = waves_cwt['ECG_R_Onsets']
+        ecg_r_offsets = waves_cwt['ECG_R_Offsets']
+        ecg_t_offsets = waves_cwt['ECG_T_Offsets']
+
+        print(f'ECG_R_Peaks: {len(ecg_r_peaks)}, ECG_R_Onsets: {len(ecg_r_onsets)}, ECG_R_Offsets: {len(ecg_r_offsets)}, ECG_T_Offsets: {len(ecg_t_offsets)}')
+
+        if max_len < max(len(ecg_r_peaks), len(ecg_r_onsets), len(ecg_r_offsets), len(ecg_t_offsets)):
+            max_len = max(len(ecg_r_peaks), len(ecg_r_onsets), len(ecg_r_offsets), len(ecg_t_offsets))
+    
+        electrodes_ecg_r_peaks.append(ecg_r_peaks)
+        electrodes_ecg_r_onsets.append(ecg_r_onsets)
+        electrodes_ecg_r_offsets.append(ecg_r_offsets)
+        electrodes_ecg_t_offsets.append(ecg_t_offsets)
+
+    new_electrodes_ecg_r_peaks   = np.zeros((len(signals), max_len))
+    new_electrodes_ecg_r_onsets  = np.zeros((len(signals), max_len))
+    new_electrodes_ecg_r_offsets = np.zeros((len(signals), max_len))
+    new_electrodes_ecg_t_offsets = np.zeros((len(signals), max_len))
+
+    loop = True
+
+    cont = np.zeros(len(signals))
+
+    cont_list = 0
+
+    while (loop):
+
+        valid_values = []
+
+        loop = False
+
+        for i in range(len(signals)):
+            if cont[i] < len(electrodes_ecg_r_peaks[i]):
+                loop = True
+                valid_values.append(electrodes_ecg_r_peaks[i][int(cont[i])])
+
+        if (loop == False):
+            break
+
+        # median_value = np.median(valid_values)
+        min_value = min(valid_values)
+
+        # for i in range(len(signals)):
+        #     if cont[i] < len(electrodes_ecg_r_peaks[i]) and abs(electrodes_ecg_r_peaks[i][int(cont[i])] - min_value) < 300:
+        #         new_electrodes_ecg_r_peaks[i][cont_list] = electrodes_ecg_r_peaks[i][int(cont[i])]
+        #         new_electrodes_ecg_r_onsets[i][cont_list] = electrodes_ecg_r_onsets[i][int(cont[i])] 
+        #         new_electrodes_ecg_r_offsets[i][cont_list] = electrodes_ecg_r_offsets[i][int(cont[i])] 
+        #         new_electrodes_ecg_t_offsets[i][cont_list] = electrodes_ecg_t_offsets[i][int(cont[i])] 
+        #         cont[i] += 1
+        #     else:
+        #         new_electrodes_ecg_r_peaks[i][cont_list] = np.nan
+        #         new_electrodes_ecg_r_onsets[i][cont_list] = np.nan
+        #         new_electrodes_ecg_r_offsets[i][cont_list] = np.nan
+        #         new_electrodes_ecg_t_offsets[i][cont_list] = np.nan 
+
+        for i in range(len(signals)):
+            if (cont[i] < len(electrodes_ecg_r_peaks[i]) and abs(electrodes_ecg_r_peaks[i][int(cont[i])] - min_value) < 300):
+                new_electrodes_ecg_r_peaks[i, cont_list] = electrodes_ecg_r_peaks[i][int(cont[i])]
+                new_electrodes_ecg_r_onsets[i, cont_list] = (
+                    electrodes_ecg_r_onsets[i][int(cont[i])]
+                    if int(cont[i]) < len(electrodes_ecg_r_onsets[i])
+                    else np.nan
+                )
+                new_electrodes_ecg_r_offsets[i, cont_list] = (
+                    electrodes_ecg_r_offsets[i][int(cont[i])]
+                    if int(cont[i]) < len(electrodes_ecg_r_offsets[i])
+                    else np.nan
+                )
+                new_electrodes_ecg_t_offsets[i, cont_list] = (
+                    electrodes_ecg_t_offsets[i][int(cont[i])]
+                    if int(cont[i]) < len(electrodes_ecg_t_offsets[i])
+                    else np.nan
+                )
+                cont[i] += 1
+            else:
+                new_electrodes_ecg_r_peaks[i, cont_list] = np.nan
+                new_electrodes_ecg_r_onsets[i, cont_list] = np.nan
+                new_electrodes_ecg_r_offsets[i, cont_list] = np.nan
+                new_electrodes_ecg_t_offsets[i, cont_list] = np.nan
+
+        cont_list += 1
+
+        if cont_list >= max_len:
+            loop = False
+            break
+
+    for j in range(1, max_len):
+        median_r_peaks = np.nanmedian(new_electrodes_ecg_r_peaks[:, j])
+        median_r_peaks_last = np.nanmedian(new_electrodes_ecg_r_peaks[:, j - 1])
+        median_r_offsets = np.nanmedian(new_electrodes_ecg_r_offsets[:, j])
+        median_r_onsets = np.nanmedian(new_electrodes_ecg_r_onsets[:, j])
+        median_t_offsets = np.nanmedian(new_electrodes_ecg_t_offsets[:,j])
+
+        if (np.isnan(median_r_peaks) or np.isnan(median_r_peaks_last) or np.isnan(median_r_onsets) or np.isnan(median_r_offsets) or np.isnan(median_t_offsets)):
+            continue
+
+        if (median_r_peaks - median_r_peaks_last > 1.1 * 600 or median_r_peaks - median_r_peaks_last < 0.7 * 200):
+            continue
+
+        janela.freq.append((median_r_peaks_last, median_r_peaks, median_r_peaks - median_r_peaks_last))
+        for i in freq_table.get_children():
+            freq_table.delete(i)
+        for f in janela.freq:
+            freq_table.insert("", tk.END, values = f)
+    
+        janela.qrs.append((median_r_onsets, median_r_offsets, median_r_peaks - median_r_peaks_last, median_r_offsets - median_r_onsets))
+        for i in qrs_table.get_children():
+            qrs_table.delete(i)
+        for q in janela.qrs:
+            qrs_table.insert("", tk.END, values = q)
+
+        janela.qt.append((median_r_onsets, median_t_offsets, median_r_peaks - median_r_peaks_last, median_t_offsets - median_r_onsets))
+        for i in qt_table.get_children():
+            qt_table.delete(i)
+        for q in janela.qt:
+            qt_table.insert("", tk.END, values = q)
+
+    message_label.config(text = "Automatic Markings Completed Successfully.")
+    message_label.update_idletasks()
+
+def select_electrodes():
+    electrodes_window = tk.Toplevel(janela)
+    electrodes_window.title("Select Electrodes")
+
+    electrode_list = ttk.Treeview(electrodes_window, columns=('Electrode'), show='headings', selectmode='extended')
+    electrode_list.heading('Electrode', text='Electrode')
+    electrode_list.pack(fill=tk.BOTH, expand=True)
+
+    electrodes = ['All','I', 'II', 'III', 'AVR', 'AVL', 'AVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6']
+    for electrode in electrodes:
+        electrode_list.insert("", tk.END, values=(electrode,))
+
+    selected_electrode = []
+
+    def on_select():
+        selected_items = electrode_list.selection()
+        if selected_items:
+            for selected_item in selected_items:
+                item = electrode_list.item(selected_item)
+                selected_electrode.append(item['values'][0]) 
+        electrodes_window.destroy()
+
+    select_button = tk.Button(electrodes_window, text="Select", command=on_select)
+    select_button.pack(pady=10)
+
+    electrodes_window.wait_window()
+
+    for signal in selected_electrode:
+        if (signal == "All"):
+            return ['I', 'II', 'III', 'AVR', 'AVL', 'AVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6']
+
+    return selected_electrode 
 
 def key_press(event):
     print(event.keysym.lower())
@@ -612,6 +794,7 @@ parser.add_argument('--arrhythmia_file', action = 'store', dest = 'arrhythmia_fi
 parser.add_argument('--extrasystole_file', action = 'store', dest = 'extrasystole_file', required = False, default = 'extrasystole_file.txt', help = 'Output file with extrasystole marking')
 parser.add_argument('--apd_file', action = 'store', dest = 'apd_file', required = False, default = 'apd_file.txt', help = 'Output file with estimated APD data')
 parser.add_argument('-r', action = 'store', dest = 'raw_data', required = False, default = 1, help = 'Raw Data (1) or not (0)')
+parser.add_argument('-c', action = 'store', dest = 'clean_signal', required = False, default = 0, help = 'Clean signal (1) or not (0)')
 
 arguments = parser.parse_args()
 
@@ -626,6 +809,7 @@ arrhythmia_file = arguments.arrhythmia_file
 extrasystole_file = arguments.extrasystole_file
 raw_data = int(arguments.raw_data)
 input_file = int(arguments.input_file)
+clean_signal = int(arguments.clean_signal)
 
 electrodes = {}
 num_lines = 0
@@ -693,22 +877,26 @@ frame_right.grid(row = 0, column = 1, sticky = "nsew")
 frame_right.columnconfigure(0, weight = 1)
 frame_right.columnconfigure(1, weight = 1)
 frame_right.rowconfigure(0, weight = 1)
-frame_right.rowconfigure(1, weight = 3)
-frame_right.rowconfigure(2, weight = 1)
-frame_right.rowconfigure(3, weight = 3)
-frame_right.rowconfigure(4, weight = 1)
-frame_right.rowconfigure(5, weight = 3)
-frame_right.rowconfigure(6, weight = 1)
-frame_right.rowconfigure(7, weight = 3)
-frame_right.rowconfigure(8, weight = 1)
-frame_right.rowconfigure(9, weight = 3)
-frame_right.rowconfigure(10, weight = 1)
+frame_right.rowconfigure(1, weight = 1)
+frame_right.rowconfigure(2, weight = 3)
+frame_right.rowconfigure(3, weight = 1)
+frame_right.rowconfigure(4, weight = 3)
+frame_right.rowconfigure(5, weight = 1)
+frame_right.rowconfigure(6, weight = 3)
+frame_right.rowconfigure(7, weight = 1)
+frame_right.rowconfigure(8, weight = 3)
+frame_right.rowconfigure(9, weight = 1)
+frame_right.rowconfigure(10, weight = 3)
+frame_right.rowconfigure(11, weight = 1)
+
+freq_button = tk.Button(frame_right, text='Automatic Marking', command = automatic_period_marking)
+freq_button.grid(row = 0, column = 2, columnspan = 4, padx = 20, pady = 10, ipadx = 20)
 
 freq_name = tk.Label(frame_right, text = "Period", font = ('Arial', 16))
-freq_name.grid(column = 0, row = 0, columnspan = 4, padx = 2, pady = 10)
+freq_name.grid(column = 0, row = 1, columnspan = 4, padx = 2, pady = 2)
 
 freq_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency'), show = 'headings', height = 5)
-freq_table.grid(row = 1, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'n')
+freq_table.grid(row = 2, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
 freq_table.heading('initial_x', text = 'Initial X')
 freq_table.heading('final_x', text = 'Final X')
 freq_table.heading('frequency', text = 'Period')
@@ -717,13 +905,17 @@ freq_table.column('initial_x', width = 160, anchor = 'center')
 freq_table.column('final_x', width = 160, anchor = 'center')
 freq_table.column('frequency', width = 160, anchor = 'center')
 
+scrollbar_vertical_freq = tk.Scrollbar(frame_right, orient='vertical', command=freq_table.yview)
+scrollbar_vertical_freq.grid(row=2, column=4, sticky='ns')
+freq_table.configure(yscrollcommand=scrollbar_vertical_freq.set)
+
 freq_table.bind('<<TreeviewSelect>>', freq_selected)
 
 qrs_name = tk.Label(frame_right, text = "QRS", font = ('Arial', 16))
-qrs_name.grid(column = 0, row = 2, columnspan = 4, padx = 2, pady = 2)
+qrs_name.grid(column = 0, row = 3, columnspan = 4, padx = 2, pady = 2)
 
 qrs_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency', 'qrs'), show = 'headings', height = 5)
-qrs_table.grid(row = 3, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'n')
+qrs_table.grid(row = 4, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
 qrs_table.heading('initial_x', text = 'Initial X')
 qrs_table.heading('final_x', text = 'Final X')
 qrs_table.heading('frequency', text = 'Period')
@@ -734,13 +926,17 @@ qrs_table.column('final_x', width = 120, anchor = 'center')
 qrs_table.column('frequency', width = 120, anchor = 'center')
 qrs_table.column('qrs', width = 120, anchor = 'center')
 
+scrollbar_vertical_qrs = tk.Scrollbar(frame_right, orient='vertical', command=qrs_table.yview)
+scrollbar_vertical_qrs.grid(row=4, column=4, sticky='ns')
+qrs_table.configure(yscrollcommand=scrollbar_vertical_qrs.set)
+
 qrs_table.bind('<<TreeviewSelect>>', qrs_selected)
 
 qt_name = tk.Label(frame_right, text = "QT", font = ('Arial', 16))
-qt_name.grid(column = 0, row = 4, columnspan = 4, padx = 2, pady = 2)
+qt_name.grid(column = 0, row = 5, columnspan = 4, padx = 2, pady = 2)
 
 qt_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency', 'qt'), show = 'headings', height = 5)
-qt_table.grid(row = 5, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'n')
+qt_table.grid(row = 6, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
 qt_table.heading('initial_x', text = 'Initial X')
 qt_table.heading('final_x', text = 'Final X')
 qt_table.heading('frequency', text = 'Period')
@@ -751,13 +947,17 @@ qt_table.column('final_x', width = 120, anchor = 'center')
 qt_table.column('frequency', width = 120, anchor = 'center')
 qt_table.column('qt', width = 120, anchor = 'center')
 
+scrollbar_vertical_qt = tk.Scrollbar(frame_right, orient='vertical', command=qt_table.yview)
+scrollbar_vertical_qt.grid(row=6, column=4, sticky='ns')
+qt_table.configure(yscrollcommand=scrollbar_vertical_qt.set)
+
 qt_table.bind('<<TreeviewSelect>>', qt_selected)
 
 extrasystole_name = tk.Label(frame_right, text = "Extrasystole", font = ('Arial', 16))
-extrasystole_name.grid(column = 0, row = 6, columnspan = 4, padx = 2, pady = 2)
+extrasystole_name.grid(column = 0, row = 7, columnspan = 4, padx = 2, pady = 2)
 
 extrasystole_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency', 'duration'), show = 'headings', height = 5)
-extrasystole_table.grid(row = 7, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'n')
+extrasystole_table.grid(row = 8, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
 extrasystole_table.heading('initial_x', text = 'Initial X')
 extrasystole_table.heading('final_x', text = 'Final X')
 extrasystole_table.heading('frequency', text = 'Period')
@@ -768,13 +968,17 @@ extrasystole_table.column('final_x', width = 120, anchor = 'center')
 extrasystole_table.column('frequency', width = 120, anchor = 'center')
 extrasystole_table.column('duration', width = 120, anchor = 'center')
 
+scrollbar_vertical_extrasystole = tk.Scrollbar(frame_right, orient='vertical', command=extrasystole_table.yview)
+scrollbar_vertical_extrasystole.grid(row=8, column=4, sticky='ns')
+extrasystole_table.configure(yscrollcommand=scrollbar_vertical_extrasystole.set)
+
 extrasystole_table.bind('<<TreeviewSelect>>', extrasystole_selected)
 
 arrhythmia_name = tk.Label(frame_right, text = "Arrhythmia", font = ('Arial', 16))
-arrhythmia_name.grid(column = 0, row = 8, columnspan = 4, padx = 2, pady = 2)
+arrhythmia_name.grid(column = 0, row = 9, columnspan = 4, padx = 2, pady = 2)
 
 arrhythmia_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency', 'duration'), show = 'headings', height = 5)
-arrhythmia_table.grid(row = 9, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'n')
+arrhythmia_table.grid(row = 10, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
 arrhythmia_table.heading('initial_x', text = 'Initial X')
 arrhythmia_table.heading('final_x', text = 'Final X')
 arrhythmia_table.heading('frequency', text = 'Period')
@@ -785,6 +989,10 @@ arrhythmia_table.column('final_x', width = 120, anchor = 'center')
 arrhythmia_table.column('frequency', width = 120, anchor = 'center')
 arrhythmia_table.column('duration', width = 120, anchor = 'center')
 
+scrollbar_vertical_arrhythmia = tk.Scrollbar(frame_right, orient='vertical', command=arrhythmia_table.yview)
+scrollbar_vertical_arrhythmia.grid(row=10, column=4, sticky='ns')
+arrhythmia_table.configure(yscrollcommand=scrollbar_vertical_arrhythmia.set)
+
 arrhythmia_table.bind('<<TreeviewSelect>>', arrhythmia_selected)
 
 freq_table.bind('<Delete>', delete_selected)
@@ -794,18 +1002,18 @@ extrasystole_table.bind('<Delete>', delete_selected)
 arrhythmia_table.bind('<Delete>', delete_selected)
 
 username_label = tk.Label(frame_right, text = "X Limit:")
-username_label.grid(column = 0, row = 11, padx = 10, pady = 1, ipadx = 1, ipady = 1, sticky = 'e')
+username_label.grid(column = 0, row = 12, padx = 10, pady = 1, ipadx = 1, ipady = 1, sticky = 'e')
 
 textbox = tk.Entry(frame_right)
 textbox.insert(tk.END, xlim)
-textbox.grid(row = 11, column = 1, padx = 0, pady = 0, sticky='w')
+textbox.grid(row = 12, column = 1, padx = 0, pady = 0, sticky='w')
 textbox.bind('<Return>', on_enter)
 
 plot_button = tk.Button(frame_right, text='Plot Data', command = plot_data)
-plot_button.grid(row = 11, column = 2, pady = 10, ipadx = 10)
+plot_button.grid(row = 12, column = 2, pady = 10, ipadx = 10)
 
 save = tk.Button(frame_right, text = 'Save', command = save_data)
-save.grid(row = 11, column = 3, padx = 20, pady = 10, ipadx = 20)
+save.grid(row = 12, column = 3, padx = 20, pady = 10, ipadx = 20)
 
 janela.click_state = 0
 janela.line_coords = []
@@ -821,7 +1029,7 @@ dx_var = tk.StringVar()
 dx_var.set("dx: 0.00")
 
 dx = tk.Label(janela, textvariable=dx_var)
-dx.grid(column = 0, row = 10, padx = 10, pady = 1, ipadx = 1, ipady = 1, sticky = 'e')
+dx.grid(column = 0, row = 11, padx = 10, pady = 1, ipadx = 1, ipady = 1, sticky = 'e')
 
 fig.canvas.mpl_connect('motion_notify_event', onmotion)
 
