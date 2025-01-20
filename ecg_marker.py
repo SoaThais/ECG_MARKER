@@ -847,9 +847,10 @@ ax.set_xlim(0, xlim)
 
 for electrode in electrodes:
     if (cont != 0):
-        offset += max(electrodes[electrode]['values']) - min(electrodes[electrode]['values'])
+        offset += 1000
+        # offset += max(electrodes[electrode]['values']) - min(electrodes[electrode]['values'])
     ax.plot(x, np.array(electrodes[electrode]['values']) + offset, label = electrode)
-    offset += max(electrodes[electrode]['values'])
+    # offset += max(electrodes[electrode]['values'])
     cont += 1
 ax.legend(loc = 'upper left')
 ax.yaxis.set_visible(False)

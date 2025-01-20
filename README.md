@@ -133,3 +133,7 @@ python3 ecg_marker.py  -i input/ -f 0
 ```bash
 python3 ecg_marker.py  -i output/ecg_data.txt -r 0 
 ```
+
+## Note
+
+If a folder is used as input, name the files in the directory in alphabetical order.
