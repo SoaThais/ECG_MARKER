@@ -1,3 +1,11 @@
+# ECG Marker - Ferramenta Interativa de Marcação de Eventos em Sinais de ECG
+
+# Este programa permite a visualização e anotação interativa de traçados de ECG a partir de arquivos
+# de entrada (dados brutos ou previamente anotados). 
+
+# Desenvolvido por: Thaís de Jesus Soares
+
+# Bibliotecas
 import tkinter as tk
 from tkinter import ttk
 import matplotlib.pyplot as plt
@@ -8,10 +16,23 @@ import argparse
 import os
 import neurokit2 as nk
 
+# Lista com todos os nomes de canais (eletrodos) esperados nos arquivos de entrada
 head_file = ['I', 'II', 'III', 'AVR', 'AVL', 'AVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6', 'HISp', 'HISd', 'VD p', 'VD 78', 'VD 56', 'VD 34', 'VD d']
+# Subconjunto de canais que vão ser processados
 head      = ['VD d', 'I', 'II', 'III', 'AVR', 'AVL', 'AVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6']
 
 def read_file(filename):
+    
+    # Lê um arquivo CSV contendo sinais de eletrodos e retorna os dados organizados.
+
+    # Parâmetros:
+    #     filename (str): Caminho para o arquivo CSV a ser lido.
+
+    # Retorno:
+    #     infos (dict): Dicionário contendo os valores dos eletrodos especificados em `head`.
+    #                   Estrutura: { 'nome_do_eletrodo': {'values': [valores]} }
+    #     num_lines (int): Número de linhas de dados (amostras) no arquivo.
+
     with open(filename, 'r') as f:
         indexes = []
         for i in head:
@@ -33,6 +54,19 @@ def read_file(filename):
     return infos, num_lines
 
 def read_dir(input_dir):
+
+    # Lê todos os arquivos CSV de um diretório contendo sinais de eletrodos e 
+    # agrega os dados em um único dicionário.
+
+    # Parâmetros:
+    #     input_dir (str): Caminho para o diretório contendo os arquivos CSV.
+
+    # Retorno:
+    #     infos (dict): Dicionário contendo os valores dos eletrodos especificados em `head`.
+    #                   Os dados são concatenados de todos os arquivos encontrados.
+    #                   Estrutura: { 'nome_do_eletrodo': {'values': [valores]} }
+    #     num_lines (int): Número total de linhas de dados (amostras) somando todos os arquivos.
+
     indexes = []
     for i in head:
         indexes.append(head_file.index(i))
@@ -63,6 +97,12 @@ def read_dir(input_dir):
     return infos, num_lines
 
 def update(val):
+
+    # Atualiza a visualização do gráfico com base na posição da barra de rolagem.
+
+    # Parâmetros:
+    #     val (float): Novo valor da barra de rolagem (posição inicial da janela de visualização).
+
     start_index = int(scrollbar.val)
         
     if (start_index + xlim < num_lines):
@@ -73,6 +113,13 @@ def update(val):
     fig.canvas.draw_idle()
 
 def on_enter(event):
+
+    # Altera o tamanho da janela de visualização (xlim) com base na entrada do usuário 
+    # na caixa de texto, e atualiza o gráfico.
+
+    # Parâmetros:
+    #     event: Evento de pressionar Enter (fornecido automaticamente pelo matplotlib)
+
     global xlim
     textbox_value = textbox.get()
     try:
@@ -86,6 +133,27 @@ def on_enter(event):
         print("Invalid input. Please enter a numeric value.")
 
 def onclick(event):
+
+    # Lida com cliques do mouse no gráfico para selecionar intervalos temporais no sinal.
+
+    # Parâmetros:
+    #     event: Evento do matplotlib associado a um clique do mouse.
+
+    # Funcionalidade:
+    #     - Quando o botão esquerdo do mouse (event.button == 1) é clicado sobre o gráfico (event.inaxes == ax):
+    #         - Se for o primeiro clique (janela.click_state == 0):
+    #             - Remove a linha vertical anterior (se existir) com o label 'vertical_line_1'.
+    #             - Adiciona a coordenada x do clique à lista `janela.line_coords`.
+    #             - Desenha uma linha vertical vermelha tracejada na posição clicada.
+    #             - Atualiza o estado de clique para 1.
+    #         - Se for o segundo clique (janela.click_state == 1):
+    #             - Remove a linha vertical anterior com o label 'vertical_line_2'.
+    #             - Adiciona a nova coordenada x.
+    #             - Calcula o intervalo entre os dois cliques (em unidades do eixo x).
+    #             - Desenha uma linha vertical azul tracejada na nova posição.
+    #             - Atualiza o estado de clique para 2.
+    #             - Atualiza uma mensagem na interface (`message_label`) com instruções para classificar o intervalo.
+
     if event.inaxes == ax and event.button == 1:
         if janela.click_state == 0:
             for line in ax.lines:
@@ -109,6 +177,25 @@ def onclick(event):
             message_label.config(text = "Press 'F' to add Period, 'R' to add QRS, 'T' to add QT, 'E' to add extrasystole, 'A' to add arrhythmia or 'C' to cancel.")
 
 def automatic_period_marking():
+
+    # Realiza a marcação automática de períodos cardíacos (R-peaks, QRS, QT) em sinais eletrocardiográficos (ECG) 
+    # de múltiplos eletrodos selecionados.
+
+    # Funcionalidade:
+    #     - Lê sinais de eletrodos definidos pelo usuário via `select_electrodes()`.
+    #     - (Opcional) Aplica limpeza do sinal com neurokit2 (`nk.ecg_clean`).
+    #     - Detecta automaticamente:
+    #         - Picos R (R-peaks)
+    #         - Inícios e finais de onda R (onsets e offsets)
+    #         - Finais de onda T
+    #     - Sincroniza as detecções entre diferentes eletrodos (alinhando picos similares no tempo).
+    #     - Calcula medianas das detecções para extrair batimentos representativos.
+    #     - Calcula parâmetros:
+    #         - Frequência cardíaca (intervalo RR)
+    #         - Duração do complexo QRS
+    #         - Intervalo QT
+    #     - Atualiza as tabelas gráficas (`freq_table`, `qrs_table`, `qt_table`) com os dados extraídos.
+    #     - Mostra mensagens no rótulo da interface (`message_label`) indicando o progresso.
 
     signals = select_electrodes()
 
@@ -257,6 +344,22 @@ def automatic_period_marking():
     message_label.update_idletasks()
 
 def select_electrodes():
+
+    # Exibe uma janela gráfica para o usuário selecionar os eletrodos ECG que deseja analisar.
+
+    # Funcionalidade:
+    #     - Cria uma janela (`Toplevel`) com uma lista interativa de eletrodos.
+    #     - Permite múltiplas seleções na lista (`selectmode='extended'`).
+    #     - Caso o usuário selecione "All", retorna todos os eletrodos padrão.
+    #     - Caso contrário, retorna apenas os eletrodos escolhidos pelo usuário.
+
+    # Eletrodos disponíveis:
+    #     - 'All', 'I', 'II', 'III', 'AVR', 'AVL', 'AVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6'
+
+    # Retorno:
+    #     selected_electrode (list of str): Lista com os nomes dos eletrodos selecionados.
+    #                                       Se "All" for escolhido, retorna todos os eletrodos padrão.
+
     electrodes_window = tk.Toplevel(janela)
     electrodes_window.title("Select Electrodes")
 
@@ -290,7 +393,29 @@ def select_electrodes():
     return selected_electrode 
 
 def key_press(event):
-    print(event.keysym.lower())
+
+    # Trata eventos de pressionamento de tecla na interface gráfica para registrar ou cancelar marcações manuais 
+    # de intervalos no sinal (como períodos, QRS, QT, extrassístoles e arritmias).
+
+    # Parâmetros:
+    #     event: Objeto de evento do `matplotlib` contendo informações da tecla pressionada.
+
+    # Teclas e ações:
+    #     - 'F': Salva o intervalo atual como um "período" (RR) e insere na tabela `freq_table`.
+    #     - 'R': Salva o intervalo como um complexo QRS na tabela `qrs_table`.
+    #     - 'T': Salva o intervalo como um QT na tabela `qt_table`.
+    #     - 'E': Salva o intervalo como uma extrassístole na tabela `extrasystole_table`.
+    #     - 'A': Salva o intervalo como uma arritmia na tabela `arrhythmia_table`.
+    #     - 'C': Cancela a marcação atual (remove linhas verticais e reseta estado).
+    #     - 'Esc': Cancela todas as marcações visuais e reseta o estado da janela.
+
+    # Funcionalidade:
+    #     - Apenas executa ações se houver duas marcações feitas no gráfico (`janela.click_state == 2`).
+    #     - As marcações são feitas previamente via cliques, armazenadas em `janela.line_coords`.
+    #     - Cada tecla insere os valores formatados nas listas apropriadas da estrutura `janela` e atualiza as tabelas Tkinter.
+    #     - Atualiza o rótulo de mensagem (`message_label`) com feedback textual ao usuário.
+    #     - Remove marcações gráficas usando `ax.lines` e `fig.canvas.draw()` quando necessário.
+
     if event.keysym.lower() == 'f':
         if janela.click_state == 2:
             initial_x = f"{janela.line_coords[-2]:.2f}"
@@ -392,6 +517,23 @@ def key_press(event):
         janela.line_coords = []
 
 def select_frequency():
+
+    # Abre uma janela modal para o usuário selecionar um período (frequência) a partir de uma lista 
+    # pré-existente de períodos exibidos na tabela `freq_table`.
+
+    # Funcionalidade:
+    #     - Cria uma nova janela (`Toplevel`) contendo uma `Treeview` com colunas para:
+    #       - Ponto inicial (Initial X)
+    #       - Ponto final (Final X)
+    #       - Período (Frequency)
+    #     - Preenche a lista com os valores atuais da tabela global `freq_table`.
+    #     - Permite seleção única de um período.
+    #     - Ao clicar em "Select", a janela é fechada e o período selecionado é retornado.
+
+    # Retorno:
+    #     selected_freq (float ou None): Valor do período selecionado pelo usuário (coluna 'frequency').
+    #                                    Retorna `None` se nenhuma seleção for feita.
+
     freq_window = tk.Toplevel(janela)
     freq_window.title("Select Period")
     
@@ -421,6 +563,18 @@ def select_frequency():
     return selected_freq[0] if selected_freq else None
 
 def freq_selected(event):
+
+    # Evento acionado ao selecionar um intervalo na tabela de frequências (`freq_table`).
+
+    # Funcionalidade:
+    #     - Remove linhas verticais verdes existentes relacionadas à frequência no gráfico.
+    #     - Para cada intervalo selecionado na tabela, adiciona duas linhas verticais verdes no gráfico,
+    #       representando o início e o fim do período selecionado.
+    #     - Atualiza o gráfico para refletir essas linhas.
+
+    # Parâmetros:
+    #     event: Evento de seleção disparado pelo widget Treeview (freq_table).
+
     for line in ax.lines:
         if line.get_label() in ['freq_1', 'freq_2']:
             line.remove()
@@ -434,6 +588,18 @@ def freq_selected(event):
     fig.canvas.draw()
 
 def qrs_selected(event):
+
+    # Evento acionado ao selecionar um intervalo na tabela de complexos QRS (`qrs_table`).
+
+    # Funcionalidade:
+    #     - Remove linhas verticais roxas existentes relacionadas ao QRS no gráfico.
+    #     - Para cada intervalo selecionado na tabela, adiciona duas linhas verticais roxas no gráfico,
+    #       indicando início e fim do complexo QRS.
+    #     - Atualiza o gráfico para exibir essas linhas.
+
+    # Parâmetros:
+    #     event: Evento de seleção disparado pelo widget Treeview (qrs_table).
+
     for line in ax.lines:
         if line.get_label() in ['qrs_1', 'qrs_2']:
             line.remove()
@@ -447,6 +613,18 @@ def qrs_selected(event):
     fig.canvas.draw()
 
 def qt_selected(event):
+
+    # Evento acionado ao selecionar um intervalo na tabela QT (`qt_table`).
+
+    # Funcionalidade:
+    #     - Remove linhas verticais laranjas existentes relacionadas ao intervalo QT no gráfico.
+    #     - Para cada intervalo selecionado na tabela, adiciona duas linhas verticais laranjas no gráfico,
+    #       representando início e fim do intervalo QT.
+    #     - Atualiza o gráfico para refletir essas linhas.
+
+    # Parâmetros:
+    #     event: Evento de seleção disparado pelo widget Treeview (qt_table).
+
     for line in ax.lines:
         if line.get_label() in ['qt_1', 'qt_2']:
             line.remove()
@@ -460,6 +638,18 @@ def qt_selected(event):
     fig.canvas.draw()
 
 def extrasystole_selected(event):
+
+    # Evento acionado ao selecionar um intervalo na tabela de extrassístoles (`extrasystole_table`).
+
+    # Funcionalidade:
+    #     - Remove linhas verticais amarelas existentes relacionadas às extrassístoles no gráfico.
+    #     - Para cada intervalo selecionado na tabela, adiciona duas linhas verticais amarelas no gráfico,
+    #       indicando início e fim da extrassístole.
+    #     - Atualiza o gráfico para refletir essas linhas.
+
+    # Parâmetros:
+    #     event: Evento de seleção disparado pelo widget Treeview (extrasystole_table).
+
     for line in ax.lines:
         if line.get_label() in ['extrasystole_1', 'extrasystole_2']:
             line.remove()
@@ -473,6 +663,18 @@ def extrasystole_selected(event):
     fig.canvas.draw()
 
 def arrhythmia_selected(event):
+
+    # Evento acionado ao selecionar um intervalo na tabela de arritmias (`arrhythmia_table`).
+
+    # Funcionalidade:
+    #     - Remove linhas verticais rosas existentes relacionadas às arritmias no gráfico.
+    #     - Para cada intervalo selecionado na tabela, adiciona duas linhas verticais rosas no gráfico,
+    #       indicando início e fim da arritmia.
+    #     - Atualiza o gráfico para refletir essas linhas.
+
+    # Parâmetros:
+    #     event: Evento de seleção disparado pelo widget Treeview (arrhythmia_table).
+
     for line in ax.lines:
         if line.get_label() in ['arrhythmia_1', 'arrhythmia_2']:
             line.remove()
@@ -486,6 +688,27 @@ def arrhythmia_selected(event):
     fig.canvas.draw()
 
 def save_data():
+
+    # Salva os dados extraídos da análise do ECG em arquivos de texto e gráficos no diretório especificado.
+
+    # Funcionalidade:
+    #     - Cria o diretório de saída (`output_dir`) se não existir.
+    #     - Salva:
+    #         - Número de linhas do sinal original.
+    #         - Sinais dos eletrodos selecionados (exceto linhas verticais de marcação).
+    #         - Dados anotados: períodos, QRS, QT, extrassístoles e arritmias.
+    #     - Para cada tipo de marcação (QRS, QT, velocidade estimada, APD), gera e salva gráficos (`.png`) e arquivos `.txt` com os dados.
+
+    # Arquivos gerados:
+    #     - `<output_file>`: arquivo geral com todos os sinais e anotações.
+    #     - `qrs_file`: arquivo com dados de Período × Duração do QRS.
+    #     - `qt_file`: arquivo com dados de Período × Duração do QT.
+    #     - `extrasystole_file`: dados das extrassístoles (período, duração e tempos).
+    #     - `arrhythmia_file`: dados das arritmias (período, duração e tempos).
+    #     - `vel_file`: estimativas de velocidade normalizada (1/duração do QRS).
+    #     - `apd_file`: diferença entre QT e QRS (duração estimada do APD).
+    #     - `QRS.png`, `QT.png`, `Velocity.png`, `APD.png`: gráficos gerados com `matplotlib`.
+
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -603,6 +826,34 @@ def save_data():
     message_label.config(text = "Data saved successfully.")
 
 def read_data(input_file):
+
+    # Lê e interpreta os dados salvos em um arquivo de entrada formatado, contendo informações de sinais e anotações.
+
+    # Estrutura esperada do arquivo:
+    #     - "Num Lines:" seguido do número de linhas (amostras) por sinal.
+    #     - "Curves:" seguido por blocos com nome do eletrodo e valores (um por linha).
+    #     - "Period Data:" com linhas contendo (initial_x, final_x, interval).
+    #     - "QRS Data:" com linhas contendo (initial_x, final_x, period, qrs_duration).
+    #     - "QT Data:" com linhas contendo (initial_x, final_x, period, qt_duration).
+    #     - "Extrasystole Data:" com linhas contendo (initial_x, final_x, period, duration).
+    #     - "Arrhythmia Data:" com linhas contendo (initial_x, final_x, period, duration).
+
+    # Parâmetros:
+    #     input_file (str): Caminho para o arquivo de texto contendo os dados salvos.
+
+    # Retorna:
+    #     - infos (dict): Dicionário com os sinais dos eletrodos. Formato:
+    #           {
+    #             'I': {'values': [v1, v2, ...]},
+    #             ...
+    #           }
+    #     - num_lines (int): Número de linhas (amostras) por eletrodo.
+    #     - freq_data (list of tuples): Dados de períodos. Ex: [(ini, fim, intervalo), ...]
+    #     - qrs_data (list of tuples): Dados de complexos QRS. Ex: [(ini, fim, periodo, duracao), ...]
+    #     - qt_data (list of tuples): Dados de intervalos QT. Ex: [(ini, fim, periodo, duracao), ...]
+    #     - extrasystole_data (list of tuples): Dados de extrassístoles. Ex: [(ini, fim, periodo, duracao), ...]
+    #     - arrhythmia_data (list of tuples): Dados de arritmias. Ex: [(ini, fim, periodo, duracao), ...]
+        
     with open(input_file, 'r') as f:
         data = f.read().splitlines()
 
@@ -669,6 +920,20 @@ def read_data(input_file):
     return infos, num_lines, freq_data, qrs_data, qt_data, extrasystole_data, arrhythmia_data
 
 def update_tables(freq_data, qrs_data, qt_data, extrasystole_data, arrhythmia_data):
+
+    # Atualiza as tabelas gráficas da interface e as listas internas da janela com os dados fornecidos.
+
+    # Parâmetros:
+    #     freq_data (list of tuples): Lista de períodos (início, fim, duração).
+    #     qrs_data (list of tuples): Lista de complexos QRS (início, fim, período, duração).
+    #     qt_data (list of tuples): Lista de intervalos QT (início, fim, período, duração).
+    #     extrasystole_data (list of tuples): Lista de extrassístoles (início, fim, período, duração).
+    #     arrhythmia_data (list of tuples): Lista de arritmias (início, fim, período, duração).
+
+    # Ações:
+    #     - Insere os dados nas tabelas visuais correspondentes (`freq_table`, `qrs_table`, etc.).
+    #     - Atualiza os atributos da `janela` com os novos dados.
+
     janela.freq = freq_data
     for f in janela.freq:
         freq_table.insert("", tk.END, values = f)
@@ -686,6 +951,25 @@ def update_tables(freq_data, qrs_data, qt_data, extrasystole_data, arrhythmia_da
         arrhythmia_table.insert("", tk.END, values = q)
 
 def delete_selected(event):
+
+    # Remove o(s) item(ns) selecionado(s) da tabela correspondente e da estrutura de dados interna.
+
+    # Parâmetros:
+    #     event: Evento gerado ao pressionar a tecla Delete ou botão correspondente.
+    #            Atributo `event.widget` é usado para identificar qual tabela foi ativada.
+
+    # Tabelas suportadas:
+    #     - freq_table: períodos
+    #     - qrs_table: QRS
+    #     - qt_table: QT
+    #     - extrasystole_table: extrassístoles
+    #     - arrhythmia_table: arritmias
+
+    # Ações:
+    #     - Identifica a tabela associada ao evento.
+    #     - Remove os itens selecionados visualmente da tabela e logicamente da lista correspondente na `janela`.
+    #     - Exibe mensagem de sucesso via `message_label`.
+
     table = -1
     selected_item = None
     if event.widget == freq_table:
@@ -725,6 +1009,19 @@ def delete_selected(event):
         message_label.config(text="Item deleted successfully.")
 
 def plot_data():    
+
+    # Cria uma janela gráfica (Tkinter) com dois gráficos:
+    # - Velocidade Normalizada Estimada vs. Período.
+    # - APD Estimada vs. Período (se disponível).
+
+    # Ações:
+    #     - Calcula a velocidade normalizada a partir da inversa da duração do QRS.
+    #     - Normaliza os valores pela velocidade máxima.
+    #     - Plota os pontos da curva "Velocidade x Período".
+    #     - Se o número de entradas em `janela.qt` e `janela.qrs` for igual, calcula e plota o APD (QT - QRS).
+    #     - Salva o gráfico de velocidade como "Velocity.png".
+    #     - Insere os gráficos na janela com `FigureCanvasTkAgg`.
+
     plot_window = tk.Toplevel(janela)
     plot_window.title("Graphics")
     
@@ -776,6 +1073,18 @@ def plot_data():
         print('Lack of equivalence between QRS and QT periods')
                 
 def onmotion(event):
+
+    # Atualiza dinamicamente o valor de dx (diferença entre o ponto atual e o ponto de clique anterior)
+    # enquanto o cursor se move sobre o gráfico.
+
+    # Parâmetros:
+    #     event: Evento de movimento do mouse. Deve conter `xdata` e `inaxes`.
+
+    # Ações:
+    #     - Verifica se o mouse está sobre o eixo `ax`.
+    #     - Se `janela.click_state == 1`, calcula e exibe a distância horizontal (dx) entre a posição atual do mouse
+    #       e o último ponto de clique armazenado em `janela.line_coords`.
+
     if event.inaxes == ax:
         if janela.click_state == 1:
             x_atual = event.xdata
