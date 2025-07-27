@@ -1091,263 +1091,271 @@ def onmotion(event):
             diferenca = abs(x_atual - janela.line_coords[-1])
             dx_var.set(f"dx: {diferenca:.2f}")
 
-parser = argparse.ArgumentParser(description = 'ECG Marker')
-parser.add_argument('-i', action = 'store', dest = 'input', required = False, help = 'Input')
-parser.add_argument('-f', action = 'store', dest = 'input_file', required = False, default = 1, help = 'Input File (1) or Input Directory (0)')
-parser.add_argument('-d', action = 'store', dest = 'output_dir', required = False, default = './output/', help = 'Output Directory')
-parser.add_argument('-o', action = 'store', dest = 'output_file', required = False, default = 'ecg_data.txt', help = 'Output File')
-parser.add_argument('--qrs_file', action = 'store', dest = 'qrs_file', required = False, default = 'qrs_file.txt', help = 'Output file with QRS data')
-parser.add_argument('--qt_file', action = 'store', dest = 'qt_file', required = False, default = 'qt_file.txt', help = 'Output file with QT data')
-parser.add_argument('--vel_file', action = 'store', dest = 'vel_file', required = False, default = 'vel_file.txt', help = 'Output file with estimated normalized velocity data')
-parser.add_argument('--arrhythmia_file', action = 'store', dest = 'arrhythmia_file', required = False, default = 'arrhythmia_file.txt', help = 'Output file with arrhythmia marking')
-parser.add_argument('--extrasystole_file', action = 'store', dest = 'extrasystole_file', required = False, default = 'extrasystole_file.txt', help = 'Output file with extrasystole marking')
-parser.add_argument('--apd_file', action = 'store', dest = 'apd_file', required = False, default = 'apd_file.txt', help = 'Output file with estimated APD data')
-parser.add_argument('-r', action = 'store', dest = 'raw_data', required = False, default = 1, help = 'Raw Data (1) or not (0)')
-parser.add_argument('-c', action = 'store', dest = 'clean_signal', required = False, default = 0, help = 'Clean signal (1) or not (0)')
+def ecg_marker():
 
-arguments = parser.parse_args()
+    global janela, fig, ax, xlim, freq_table, qrs_table, qt_table, extrasystole_table, arrhythmia_table, dx_var
+    global message_label, scrollbar, num_lines, electrodes, clean_signal, output_dir, output_file, qrs_file, qt_file
+    global apd_file, vel_file, arrhythmia_file, extrasystole_file, raw_data, input_file, textbox
 
-input = arguments.input
-output_file = arguments.output_file
-output_dir = arguments.output_dir
-qrs_file = arguments.qrs_file
-qt_file = arguments.qt_file
-apd_file = arguments.apd_file
-vel_file = arguments.vel_file
-arrhythmia_file = arguments.arrhythmia_file
-extrasystole_file = arguments.extrasystole_file
-raw_data = int(arguments.raw_data)
-input_file = int(arguments.input_file)
-clean_signal = int(arguments.clean_signal)
+    parser = argparse.ArgumentParser(description = 'ECG Marker')
+    parser.add_argument('-i', action = 'store', dest = 'input', required = False, help = 'Input')
+    parser.add_argument('-f', action = 'store', dest = 'input_file', required = False, default = 1, help = 'Input File (1) or Input Directory (0)')
+    parser.add_argument('-d', action = 'store', dest = 'output_dir', required = False, default = './output/', help = 'Output Directory')
+    parser.add_argument('-o', action = 'store', dest = 'output_file', required = False, default = 'ecg_data.txt', help = 'Output File')
+    parser.add_argument('--qrs_file', action = 'store', dest = 'qrs_file', required = False, default = 'qrs_file.txt', help = 'Output file with QRS data')
+    parser.add_argument('--qt_file', action = 'store', dest = 'qt_file', required = False, default = 'qt_file.txt', help = 'Output file with QT data')
+    parser.add_argument('--vel_file', action = 'store', dest = 'vel_file', required = False, default = 'vel_file.txt', help = 'Output file with estimated normalized velocity data')
+    parser.add_argument('--arrhythmia_file', action = 'store', dest = 'arrhythmia_file', required = False, default = 'arrhythmia_file.txt', help = 'Output file with arrhythmia marking')
+    parser.add_argument('--extrasystole_file', action = 'store', dest = 'extrasystole_file', required = False, default = 'extrasystole_file.txt', help = 'Output file with extrasystole marking')
+    parser.add_argument('--apd_file', action = 'store', dest = 'apd_file', required = False, default = 'apd_file.txt', help = 'Output file with estimated APD data')
+    parser.add_argument('-r', action = 'store', dest = 'raw_data', required = False, default = 1, help = 'Raw Data (1) or not (0)')
+    parser.add_argument('-c', action = 'store', dest = 'clean_signal', required = False, default = 0, help = 'Clean signal (1) or not (0)')
 
-electrodes = {}
-num_lines = 0
+    arguments = parser.parse_args()
 
-if raw_data:
-    if input_file:
-        electrodes, num_lines = read_file(input)
+    input = arguments.input
+    output_file = arguments.output_file
+    output_dir = arguments.output_dir
+    qrs_file = arguments.qrs_file
+    qt_file = arguments.qt_file
+    apd_file = arguments.apd_file
+    vel_file = arguments.vel_file
+    arrhythmia_file = arguments.arrhythmia_file
+    extrasystole_file = arguments.extrasystole_file
+    raw_data = int(arguments.raw_data)
+    input_file = int(arguments.input_file)
+    clean_signal = int(arguments.clean_signal)
+
+    electrodes = {}
+    num_lines = 0
+
+    if raw_data:
+        if input_file:
+            electrodes, num_lines = read_file(input)
+        else:
+            electrodes, num_lines = read_dir(input)
     else:
-        electrodes, num_lines = read_dir(input)
-else:
-    electrodes, num_lines, freq_data, qrs_data, qt_data, extrasystole_data, arrhythmia_data = read_data(input)
-        
-    
-janela = tk.Tk()
-janela.title("ECG Marker")
+        electrodes, num_lines, freq_data, qrs_data, qt_data, extrasystole_data, arrhythmia_data = read_data(input)
+            
+    janela = tk.Tk()
+    janela.title("ECG Marker")
 
-janela.columnconfigure(0, weight = 10)
-janela.columnconfigure(1, weight = 1)
-janela.rowconfigure(0, weight = 1)
+    janela.columnconfigure(0, weight = 10)
+    janela.columnconfigure(1, weight = 1)
+    janela.rowconfigure(0, weight = 1)
 
-screen_width = janela.winfo_screenwidth() - 12
-screen_height = janela.winfo_screenheight() - 92
+    screen_width = janela.winfo_screenwidth() - 12
+    screen_height = janela.winfo_screenheight() - 92
 
-janela.geometry(f"{screen_width}x{screen_height}")
+    janela.geometry(f"{screen_width}x{screen_height}")
 
-x = np.arange(0, num_lines)
+    x = np.arange(0, num_lines)
 
-offset = 0
-cont   = 0
+    offset = 0
+    cont   = 0
 
-xlim = 1000
+    xlim = 1000
 
-fig, ax = plt.subplots()
-ax.set_xlim(0, xlim)
+    fig, ax = plt.subplots()
+    ax.set_xlim(0, xlim)
 
-for electrode in electrodes:
-    if (cont != 0):
-        offset += 1000
-        # offset += max(electrodes[electrode]['values']) - min(electrodes[electrode]['values'])
-    ax.plot(x, np.array(electrodes[electrode]['values']) + offset, label = electrode)
-    # offset += max(electrodes[electrode]['values'])
-    cont += 1
-ax.legend(loc = 'upper left')
-ax.yaxis.set_visible(False)
-ax.set_xlabel('t')
+    for electrode in electrodes:
+        if (cont != 0):
+            offset += 1000
+            # offset += max(electrodes[electrode]['values']) - min(electrodes[electrode]['values'])
+        ax.plot(x, np.array(electrodes[electrode]['values']) + offset, label = electrode)
+        # offset += max(electrodes[electrode]['values'])
+        cont += 1
+    ax.legend(loc = 'upper left')
+    ax.yaxis.set_visible(False)
+    ax.set_xlabel('t')
 
-scrollbar_ax = plt.axes([0.13, 0.02, 0.8, 0.03], facecolor = 'lightgoldenrodyellow')
-scrollbar = widgets.Slider(scrollbar_ax, 'Eixo X', 0, num_lines, valinit = 0)
+    scrollbar_ax = plt.axes([0.13, 0.02, 0.8, 0.03], facecolor = 'lightgoldenrodyellow')
+    scrollbar = widgets.Slider(scrollbar_ax, 'Eixo X', 0, num_lines, valinit = 0)
 
-scrollbar.on_changed(update)
+    scrollbar.on_changed(update)
 
-frame_left = tk.Frame(janela)
-frame_left.grid(row = 0, column = 0, sticky = "nsew", rowspan = 6)
+    frame_left = tk.Frame(janela)
+    frame_left.grid(row = 0, column = 0, sticky = "nsew", rowspan = 6)
 
-canvas_widget = tkagg.FigureCanvasTkAgg(fig, master = frame_left)
-canvas_widget.get_tk_widget().pack(fill = tk.BOTH, expand = True)
+    canvas_widget = tkagg.FigureCanvasTkAgg(fig, master = frame_left)
+    canvas_widget.get_tk_widget().pack(fill = tk.BOTH, expand = True)
 
-toolbar = tkagg.NavigationToolbar2Tk(canvas_widget, frame_left)
-toolbar.update()
+    toolbar = tkagg.NavigationToolbar2Tk(canvas_widget, frame_left)
+    toolbar.update()
 
-message_label = tk.Label(janela, text = "", font = ('Arial', 12), background='white')
-message_label.grid(row = 0, column = 0, sticky = 'n', pady = 40, padx = 20)
+    message_label = tk.Label(janela, text = "", font = ('Arial', 12), background='white')
+    message_label.grid(row = 0, column = 0, sticky = 'n', pady = 40, padx = 20)
 
-frame_right = tk.Frame(janela)
-frame_right.grid(row = 0, column = 1, sticky = "nsew")
-frame_right.columnconfigure(0, weight = 1)
-frame_right.columnconfigure(1, weight = 1)
-frame_right.rowconfigure(0, weight = 1)
-frame_right.rowconfigure(1, weight = 1)
-frame_right.rowconfigure(2, weight = 3)
-frame_right.rowconfigure(3, weight = 1)
-frame_right.rowconfigure(4, weight = 3)
-frame_right.rowconfigure(5, weight = 1)
-frame_right.rowconfigure(6, weight = 3)
-frame_right.rowconfigure(7, weight = 1)
-frame_right.rowconfigure(8, weight = 3)
-frame_right.rowconfigure(9, weight = 1)
-frame_right.rowconfigure(10, weight = 3)
-frame_right.rowconfigure(11, weight = 1)
+    frame_right = tk.Frame(janela)
+    frame_right.grid(row = 0, column = 1, sticky = "nsew")
+    frame_right.columnconfigure(0, weight = 1)
+    frame_right.columnconfigure(1, weight = 1)
+    frame_right.rowconfigure(0, weight = 1)
+    frame_right.rowconfigure(1, weight = 1)
+    frame_right.rowconfigure(2, weight = 3)
+    frame_right.rowconfigure(3, weight = 1)
+    frame_right.rowconfigure(4, weight = 3)
+    frame_right.rowconfigure(5, weight = 1)
+    frame_right.rowconfigure(6, weight = 3)
+    frame_right.rowconfigure(7, weight = 1)
+    frame_right.rowconfigure(8, weight = 3)
+    frame_right.rowconfigure(9, weight = 1)
+    frame_right.rowconfigure(10, weight = 3)
+    frame_right.rowconfigure(11, weight = 1)
 
-freq_button = tk.Button(frame_right, text='Automatic Marking', command = automatic_period_marking)
-freq_button.grid(row = 0, column = 2, columnspan = 4, padx = 20, pady = 10, ipadx = 20)
+    freq_button = tk.Button(frame_right, text='Automatic Marking', command = automatic_period_marking)
+    freq_button.grid(row = 0, column = 2, columnspan = 4, padx = 20, pady = 10, ipadx = 20)
 
-freq_name = tk.Label(frame_right, text = "Period", font = ('Arial', 16))
-freq_name.grid(column = 0, row = 1, columnspan = 4, padx = 2, pady = 2)
+    freq_name = tk.Label(frame_right, text = "Period", font = ('Arial', 16))
+    freq_name.grid(column = 0, row = 1, columnspan = 4, padx = 2, pady = 2)
 
-freq_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency'), show = 'headings', height = 5)
-freq_table.grid(row = 2, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
-freq_table.heading('initial_x', text = 'Initial X')
-freq_table.heading('final_x', text = 'Final X')
-freq_table.heading('frequency', text = 'Period')
+    freq_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency'), show = 'headings', height = 5)
+    freq_table.grid(row = 2, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
+    freq_table.heading('initial_x', text = 'Initial X')
+    freq_table.heading('final_x', text = 'Final X')
+    freq_table.heading('frequency', text = 'Period')
 
-freq_table.column('initial_x', width = 160, anchor = 'center')
-freq_table.column('final_x', width = 160, anchor = 'center')
-freq_table.column('frequency', width = 160, anchor = 'center')
+    freq_table.column('initial_x', width = 160, anchor = 'center')
+    freq_table.column('final_x', width = 160, anchor = 'center')
+    freq_table.column('frequency', width = 160, anchor = 'center')
 
-scrollbar_vertical_freq = tk.Scrollbar(frame_right, orient='vertical', command=freq_table.yview)
-scrollbar_vertical_freq.grid(row=2, column=4, sticky='ns')
-freq_table.configure(yscrollcommand=scrollbar_vertical_freq.set)
+    scrollbar_vertical_freq = tk.Scrollbar(frame_right, orient='vertical', command=freq_table.yview)
+    scrollbar_vertical_freq.grid(row=2, column=4, sticky='ns')
+    freq_table.configure(yscrollcommand=scrollbar_vertical_freq.set)
 
-freq_table.bind('<<TreeviewSelect>>', freq_selected)
+    freq_table.bind('<<TreeviewSelect>>', freq_selected)
 
-qrs_name = tk.Label(frame_right, text = "QRS", font = ('Arial', 16))
-qrs_name.grid(column = 0, row = 3, columnspan = 4, padx = 2, pady = 2)
+    qrs_name = tk.Label(frame_right, text = "QRS", font = ('Arial', 16))
+    qrs_name.grid(column = 0, row = 3, columnspan = 4, padx = 2, pady = 2)
 
-qrs_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency', 'qrs'), show = 'headings', height = 5)
-qrs_table.grid(row = 4, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
-qrs_table.heading('initial_x', text = 'Initial X')
-qrs_table.heading('final_x', text = 'Final X')
-qrs_table.heading('frequency', text = 'Period')
-qrs_table.heading('qrs', text = 'QRS')
+    qrs_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency', 'qrs'), show = 'headings', height = 5)
+    qrs_table.grid(row = 4, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
+    qrs_table.heading('initial_x', text = 'Initial X')
+    qrs_table.heading('final_x', text = 'Final X')
+    qrs_table.heading('frequency', text = 'Period')
+    qrs_table.heading('qrs', text = 'QRS')
 
-qrs_table.column('initial_x', width = 120, anchor = 'center')
-qrs_table.column('final_x', width = 120, anchor = 'center')
-qrs_table.column('frequency', width = 120, anchor = 'center')
-qrs_table.column('qrs', width = 120, anchor = 'center')
+    qrs_table.column('initial_x', width = 120, anchor = 'center')
+    qrs_table.column('final_x', width = 120, anchor = 'center')
+    qrs_table.column('frequency', width = 120, anchor = 'center')
+    qrs_table.column('qrs', width = 120, anchor = 'center')
 
-scrollbar_vertical_qrs = tk.Scrollbar(frame_right, orient='vertical', command=qrs_table.yview)
-scrollbar_vertical_qrs.grid(row=4, column=4, sticky='ns')
-qrs_table.configure(yscrollcommand=scrollbar_vertical_qrs.set)
+    scrollbar_vertical_qrs = tk.Scrollbar(frame_right, orient='vertical', command=qrs_table.yview)
+    scrollbar_vertical_qrs.grid(row=4, column=4, sticky='ns')
+    qrs_table.configure(yscrollcommand=scrollbar_vertical_qrs.set)
 
-qrs_table.bind('<<TreeviewSelect>>', qrs_selected)
+    qrs_table.bind('<<TreeviewSelect>>', qrs_selected)
 
-qt_name = tk.Label(frame_right, text = "QT", font = ('Arial', 16))
-qt_name.grid(column = 0, row = 5, columnspan = 4, padx = 2, pady = 2)
+    qt_name = tk.Label(frame_right, text = "QT", font = ('Arial', 16))
+    qt_name.grid(column = 0, row = 5, columnspan = 4, padx = 2, pady = 2)
 
-qt_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency', 'qt'), show = 'headings', height = 5)
-qt_table.grid(row = 6, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
-qt_table.heading('initial_x', text = 'Initial X')
-qt_table.heading('final_x', text = 'Final X')
-qt_table.heading('frequency', text = 'Period')
-qt_table.heading('qt', text = 'QT')
+    qt_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency', 'qt'), show = 'headings', height = 5)
+    qt_table.grid(row = 6, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
+    qt_table.heading('initial_x', text = 'Initial X')
+    qt_table.heading('final_x', text = 'Final X')
+    qt_table.heading('frequency', text = 'Period')
+    qt_table.heading('qt', text = 'QT')
 
-qt_table.column('initial_x', width = 120, anchor = 'center')
-qt_table.column('final_x', width = 120, anchor = 'center')
-qt_table.column('frequency', width = 120, anchor = 'center')
-qt_table.column('qt', width = 120, anchor = 'center')
+    qt_table.column('initial_x', width = 120, anchor = 'center')
+    qt_table.column('final_x', width = 120, anchor = 'center')
+    qt_table.column('frequency', width = 120, anchor = 'center')
+    qt_table.column('qt', width = 120, anchor = 'center')
 
-scrollbar_vertical_qt = tk.Scrollbar(frame_right, orient='vertical', command=qt_table.yview)
-scrollbar_vertical_qt.grid(row=6, column=4, sticky='ns')
-qt_table.configure(yscrollcommand=scrollbar_vertical_qt.set)
+    scrollbar_vertical_qt = tk.Scrollbar(frame_right, orient='vertical', command=qt_table.yview)
+    scrollbar_vertical_qt.grid(row=6, column=4, sticky='ns')
+    qt_table.configure(yscrollcommand=scrollbar_vertical_qt.set)
 
-qt_table.bind('<<TreeviewSelect>>', qt_selected)
+    qt_table.bind('<<TreeviewSelect>>', qt_selected)
 
-extrasystole_name = tk.Label(frame_right, text = "Extrasystole", font = ('Arial', 16))
-extrasystole_name.grid(column = 0, row = 7, columnspan = 4, padx = 2, pady = 2)
+    extrasystole_name = tk.Label(frame_right, text = "Extrasystole", font = ('Arial', 16))
+    extrasystole_name.grid(column = 0, row = 7, columnspan = 4, padx = 2, pady = 2)
 
-extrasystole_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency', 'duration'), show = 'headings', height = 5)
-extrasystole_table.grid(row = 8, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
-extrasystole_table.heading('initial_x', text = 'Initial X')
-extrasystole_table.heading('final_x', text = 'Final X')
-extrasystole_table.heading('frequency', text = 'Period')
-extrasystole_table.heading('duration', text = 'Duration')
+    extrasystole_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency', 'duration'), show = 'headings', height = 5)
+    extrasystole_table.grid(row = 8, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
+    extrasystole_table.heading('initial_x', text = 'Initial X')
+    extrasystole_table.heading('final_x', text = 'Final X')
+    extrasystole_table.heading('frequency', text = 'Period')
+    extrasystole_table.heading('duration', text = 'Duration')
 
-extrasystole_table.column('initial_x', width = 120, anchor = 'center')
-extrasystole_table.column('final_x', width = 120, anchor = 'center')
-extrasystole_table.column('frequency', width = 120, anchor = 'center')
-extrasystole_table.column('duration', width = 120, anchor = 'center')
+    extrasystole_table.column('initial_x', width = 120, anchor = 'center')
+    extrasystole_table.column('final_x', width = 120, anchor = 'center')
+    extrasystole_table.column('frequency', width = 120, anchor = 'center')
+    extrasystole_table.column('duration', width = 120, anchor = 'center')
 
-scrollbar_vertical_extrasystole = tk.Scrollbar(frame_right, orient='vertical', command=extrasystole_table.yview)
-scrollbar_vertical_extrasystole.grid(row=8, column=4, sticky='ns')
-extrasystole_table.configure(yscrollcommand=scrollbar_vertical_extrasystole.set)
+    scrollbar_vertical_extrasystole = tk.Scrollbar(frame_right, orient='vertical', command=extrasystole_table.yview)
+    scrollbar_vertical_extrasystole.grid(row=8, column=4, sticky='ns')
+    extrasystole_table.configure(yscrollcommand=scrollbar_vertical_extrasystole.set)
 
-extrasystole_table.bind('<<TreeviewSelect>>', extrasystole_selected)
+    extrasystole_table.bind('<<TreeviewSelect>>', extrasystole_selected)
 
-arrhythmia_name = tk.Label(frame_right, text = "Arrhythmia", font = ('Arial', 16))
-arrhythmia_name.grid(column = 0, row = 9, columnspan = 4, padx = 2, pady = 2)
+    arrhythmia_name = tk.Label(frame_right, text = "Arrhythmia", font = ('Arial', 16))
+    arrhythmia_name.grid(column = 0, row = 9, columnspan = 4, padx = 2, pady = 2)
 
-arrhythmia_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency', 'duration'), show = 'headings', height = 5)
-arrhythmia_table.grid(row = 10, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
-arrhythmia_table.heading('initial_x', text = 'Initial X')
-arrhythmia_table.heading('final_x', text = 'Final X')
-arrhythmia_table.heading('frequency', text = 'Period')
-arrhythmia_table.heading('duration', text = 'Duration')
+    arrhythmia_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency', 'duration'), show = 'headings', height = 5)
+    arrhythmia_table.grid(row = 10, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
+    arrhythmia_table.heading('initial_x', text = 'Initial X')
+    arrhythmia_table.heading('final_x', text = 'Final X')
+    arrhythmia_table.heading('frequency', text = 'Period')
+    arrhythmia_table.heading('duration', text = 'Duration')
 
-arrhythmia_table.column('initial_x', width = 120, anchor = 'center')
-arrhythmia_table.column('final_x', width = 120, anchor = 'center')
-arrhythmia_table.column('frequency', width = 120, anchor = 'center')
-arrhythmia_table.column('duration', width = 120, anchor = 'center')
+    arrhythmia_table.column('initial_x', width = 120, anchor = 'center')
+    arrhythmia_table.column('final_x', width = 120, anchor = 'center')
+    arrhythmia_table.column('frequency', width = 120, anchor = 'center')
+    arrhythmia_table.column('duration', width = 120, anchor = 'center')
 
-scrollbar_vertical_arrhythmia = tk.Scrollbar(frame_right, orient='vertical', command=arrhythmia_table.yview)
-scrollbar_vertical_arrhythmia.grid(row=10, column=4, sticky='ns')
-arrhythmia_table.configure(yscrollcommand=scrollbar_vertical_arrhythmia.set)
+    scrollbar_vertical_arrhythmia = tk.Scrollbar(frame_right, orient='vertical', command=arrhythmia_table.yview)
+    scrollbar_vertical_arrhythmia.grid(row=10, column=4, sticky='ns')
+    arrhythmia_table.configure(yscrollcommand=scrollbar_vertical_arrhythmia.set)
 
-arrhythmia_table.bind('<<TreeviewSelect>>', arrhythmia_selected)
+    arrhythmia_table.bind('<<TreeviewSelect>>', arrhythmia_selected)
 
-freq_table.bind('<Delete>', delete_selected)
-qrs_table.bind('<Delete>', delete_selected)
-qt_table.bind('<Delete>', delete_selected)
-extrasystole_table.bind('<Delete>', delete_selected)
-arrhythmia_table.bind('<Delete>', delete_selected)
+    freq_table.bind('<Delete>', delete_selected)
+    qrs_table.bind('<Delete>', delete_selected)
+    qt_table.bind('<Delete>', delete_selected)
+    extrasystole_table.bind('<Delete>', delete_selected)
+    arrhythmia_table.bind('<Delete>', delete_selected)
 
-username_label = tk.Label(frame_right, text = "X Limit:")
-username_label.grid(column = 0, row = 12, padx = 10, pady = 1, ipadx = 1, ipady = 1, sticky = 'e')
+    username_label = tk.Label(frame_right, text = "X Limit:")
+    username_label.grid(column = 0, row = 12, padx = 10, pady = 1, ipadx = 1, ipady = 1, sticky = 'e')
 
-textbox = tk.Entry(frame_right)
-textbox.insert(tk.END, xlim)
-textbox.grid(row = 12, column = 1, padx = 0, pady = 0, sticky='w')
-textbox.bind('<Return>', on_enter)
+    textbox = tk.Entry(frame_right)
+    textbox.insert(tk.END, xlim)
+    textbox.grid(row = 12, column = 1, padx = 0, pady = 0, sticky='w')
+    textbox.bind('<Return>', on_enter)
 
-plot_button = tk.Button(frame_right, text='Plot Data', command = plot_data)
-plot_button.grid(row = 12, column = 2, pady = 10, ipadx = 10)
+    plot_button = tk.Button(frame_right, text='Plot Data', command = plot_data)
+    plot_button.grid(row = 12, column = 2, pady = 10, ipadx = 10)
 
-save = tk.Button(frame_right, text = 'Save', command = save_data)
-save.grid(row = 12, column = 3, padx = 20, pady = 10, ipadx = 20)
+    save = tk.Button(frame_right, text = 'Save', command = save_data)
+    save.grid(row = 12, column = 3, padx = 20, pady = 10, ipadx = 20)
 
-janela.click_state = 0
-janela.line_coords = []
+    janela.click_state = 0
+    janela.line_coords = []
 
-janela.freq = []
-janela.qrs = []
-janela.qt = []
-janela.extrasystole = []
-janela.arrhythmia = []
+    janela.freq = []
+    janela.qrs = []
+    janela.qt = []
+    janela.extrasystole = []
+    janela.arrhythmia = []
 
-dx_var = tk.StringVar()
+    dx_var = tk.StringVar()
 
-dx_var.set("dx: 0.00")
+    dx_var.set("dx: 0.00")
 
-dx = tk.Label(janela, textvariable=dx_var)
-dx.grid(column = 0, row = 11, padx = 10, pady = 1, ipadx = 1, ipady = 1, sticky = 'e')
+    dx = tk.Label(janela, textvariable=dx_var)
+    dx.grid(column = 0, row = 11, padx = 10, pady = 1, ipadx = 1, ipady = 1, sticky = 'e')
 
-fig.canvas.mpl_connect('motion_notify_event', onmotion)
+    fig.canvas.mpl_connect('motion_notify_event', onmotion)
 
-if (not raw_data):
-    update_tables(freq_data, qrs_data, qt_data, extrasystole_data, arrhythmia_data)
+    if (not raw_data):
+        update_tables(freq_data, qrs_data, qt_data, extrasystole_data, arrhythmia_data)
 
-janela.bind('<Key>', key_press)
+    janela.bind('<Key>', key_press)
 
-fig.canvas.mpl_connect('button_press_event', onclick)
+    fig.canvas.mpl_connect('button_press_event', onclick)
 
-janela.mainloop()
+    janela.mainloop()
+
+if __name__ == "__main__":
+    ecg_marker()

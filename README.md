@@ -125,13 +125,13 @@ python3 ecg_marker.py  [-h] [-i INPUT] [-f INPUT_FILE] [-d OUTPUT_DIR]
 1. For unprocessed files
 
 ```bash
-python3 ecg_marker.py  -i input/ -f 0 
+python3 ./src/ecg_marker/ecg_marker.py  -i ./input/ -f 0 
 ```
 
 2. For processed files 
 
 ```bash
-python3 ecg_marker.py  -i output/ecg_data.txt -r 0 
+python3 ./src/ecg_marker/ecg_marker.py  -i ./output/ecg_data.txt -r 0 
 ```
 
 ## Note

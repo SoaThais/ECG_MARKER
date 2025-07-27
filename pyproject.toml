@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecg_marker_soathais"
+version = "v1.0.0"
+description = "This program allows the interactive visualization and annotation of ECG tracings from input files (either raw data or previously annotated)"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
+authors = [
+  { name = "Thais Soares", email = "thaissoares150102@gmail.com" }
+]
+dependencies = [
+  "numpy",
+  "matplotlib",
+  "neurokit2"
+]
+
+[project.urls]
+Homepage = "https://github.com/SoaThais/ECG_MARKER.git"
