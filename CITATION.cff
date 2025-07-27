@@ -1,0 +1,23 @@
+# This CITATION.cff file was generated with cffinit.
+# Visit https://bit.ly/cffinit to generate yours today!
+
+cff-version: 1.2.0
+title: ECG MARKER
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Thais
+    family-names: de Jesus Soares
+    email: thaissoares150102@gmail.com
+    affiliation: Federal University of Juiz de Fora
+identifiers:
+  - type: swh
+    value: 'swh:1:dir:85b845bb010b9c1648e913745b2f8d57d5421531'
+repository-code: 'https://github.com/SoaThais/ECG_MARKER.git'
+abstract: >-
+  This program allows the interactive visualization and
+  annotation of ECG tracings from input files (either raw
+  data or previously annotated).
+license: MIT
