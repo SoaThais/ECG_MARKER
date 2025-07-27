@@ -3,8 +3,8 @@ requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ecg_marker_soathais"
-version = "v1.0.0"
+name = "ecg_marker"
+version = "v2.0.0"
 description = "This program allows the interactive visualization and annotation of ECG tracings from input files (either raw data or previously annotated)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -20,7 +20,10 @@ authors = [
 dependencies = [
   "numpy",
   "matplotlib",
-  "neurokit2"
+  "neurokit2",
+  "pillow",
+  "scipy",
+  "requests"
 ]
 
 [project.urls]

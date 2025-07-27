@@ -1,6 +1,40 @@
 # ECG_MARKER
 
-## Setup on Windows
+## Install using PyPi
+
+1. Install System Requirements
+
+```bash
+sudo apt install python3-pip
+
+sudo apt install python3-tk
+
+sudo apt-get install python3-pil.imagetk
+```
+
+2. Install the latest version available on Pypi: https://pypi.org/project/ecg-marker/
+
+```bash
+pip install ecg-marker==x.x.x
+```
+
+### Test Commands
+
+1. Download the test files from the repository: https://github.com/SoaThais/ECG_MARKER/tree/main
+
+2. For unprocessed files
+
+```bash
+python3 python3 -m ecg_marker -i ./input/ -f 0 
+```
+
+3. For processed files 
+
+```bash
+python3 python3 -m ecg_marker  -i ./output/ecg_data.txt -r 0 
+```
+
+## Install source code on Windows
 
 1. Enable WSL
 
@@ -67,32 +101,37 @@ cd ECG_MARKER/
 conda env create -f environment.yml
 ```
 
-## Running the Program
-
-1. Activate the Conda environment
+8. Activate the Conda environment
 
 ```bash
 conda activate ecg_marker_env
 ```
 
-2. Install the library 
+9. Install the library 
 
 ```bash
 conda install -c conda-forge libxcb
 ```
 
-2. Run the program
+### Test Commands
+
+1. For unprocessed files
 
 ```bash
-python3 ecg_marker.py  [-h] [-i INPUT] [-f INPUT_FILE] [-d OUTPUT_DIR]
-                       [-o OUTPUT_FILE] [--qrs_file QRS_FILE]
-                       [--qt_file QT_FILE] [--vel_file VEL_FILE]
-                       [--arrhythmia_file ARRHYTHMIA_FILE]
-                       [--extrasystole_file EXTRASYSTOLE_FILE]
-                       [--apd_file APD_FILE] [-r RAW_DATA]
+python3 ./src/ecg_marker/ecg_marker.py  -i ./input/ -f 0 
 ```
 
-* Options:
+2. For processed files 
+
+```bash
+python3 ./src/ecg_marker/ecg_marker.py  -i ./output/ecg_data.txt -r 0 
+```
+
+## Note
+
+If a folder is used as input, name the files in the directory in alphabetical order.
+
+## Command line arguments
 
 ```bash
   -h, --help            show this help message and exit
@@ -119,21 +158,3 @@ python3 ecg_marker.py  [-h] [-i INPUT] [-f INPUT_FILE] [-d OUTPUT_DIR]
 
   -r RAW_DATA           Raw Data (1) or not (0)
 ```
-
-## Test Commands
-
-1. For unprocessed files
-
-```bash
-python3 ./src/ecg_marker/ecg_marker.py  -i ./input/ -f 0 
-```
-
-2. For processed files 
-
-```bash
-python3 ./src/ecg_marker/ecg_marker.py  -i ./output/ecg_data.txt -r 0 
-```
-
-## Note
-
-If a folder is used as input, name the files in the directory in alphabetical order.

@@ -1357,5 +1357,5 @@ def ecg_marker():
 
     janela.mainloop()
 
-if __name__ == "__main__":
-    ecg_marker()
+# if __name__ == "__main__":
+#     ecg_marker()
