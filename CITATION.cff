@@ -14,7 +14,7 @@ authors:
     affiliation: Federal University of Juiz de Fora
 identifiers:
   - type: swh
-    value: 'swh:1:dir:85b845bb010b9c1648e913745b2f8d57d5421531'
+    value: 'swh:1:dir:2f612a33ef718fb457ac9e7592c3806984b96d5f'
 repository-code: 'https://github.com/SoaThais/ECG_MARKER.git'
 abstract: >-
   This program allows the interactive visualization and
