@@ -15,11 +15,14 @@ import numpy as np
 import argparse
 import os
 import neurokit2 as nk
+import re
 
 # Lista com todos os nomes de canais (eletrodos) esperados nos arquivos de entrada
 head_file = ['I', 'II', 'III', 'AVR', 'AVL', 'AVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6', 'HISp', 'HISd', 'VD p', 'VD 78', 'VD 56', 'VD 34', 'VD d']
 # Subconjunto de canais que vão ser processados
 head      = ['VD d', 'I', 'II', 'III', 'AVR', 'AVL', 'AVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6']
+
+head_mono = ['V1', 'V2', 'V3', 'V4', 'V5', 'V6', 'LA', 'LL', 'RL', 'RA']
 
 def read_file(filename):
     
@@ -94,6 +97,56 @@ def read_dir(input_dir):
                 for i in indexes:
                     infos[head_file[i]]['values'].append(float(line[i]))
                     
+    return infos, num_lines
+
+def read_dir_2 (input_dir):
+    """
+    Lê todos os arquivos .txt de um diretório contendo sinais de eletrodos (formato com colunas separadas por espaço)
+    e agrega os dados em um único dicionário.
+
+    Parâmetros:
+        input_dir (str): Caminho para o diretório contendo os arquivos .txt.
+        head_mono (list): Lista com os nomes dos eletrodos, na ordem das colunas (após o tempo).
+
+    Retorno:
+        infos (dict): Dicionário contendo os valores dos eletrodos especificados em head_mono.
+                      Estrutura: { 'V1': {'values': [...]}, 'V2': {'values': [...]}, ... }
+        num_lines (int): Número total de linhas de dados somando todos os arquivos.
+    """
+    infos = {electrode: {'values': []} for electrode in head_mono}
+    num_lines = 0
+
+    arquivos = [f for f in os.listdir(input_dir) if f.endswith('.txt')]
+    arquivos.sort(key=lambda x: int(re.match(r'(\d+)', x).group()))  # pega o número no início
+
+    for filename in arquivos:
+        
+        print(filename)
+
+        file_path = os.path.join(input_dir, filename)
+        if not os.path.isfile(file_path):
+            continue
+
+        with open(file_path, 'r') as f:
+            lines = f.readlines()
+            lines = lines[::5]
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split()  # separa por espaços (qualquer quantidade)
+                
+                if len(parts) < len(head_mono) + 1:
+                    continue  # linha inválida
+                
+                # Ignora a primeira coluna (tempo)
+                values = parts[1:]
+                
+                for i, electrode in enumerate(head_mono):
+                    infos[electrode]['values'].append(float(values[i]))
+            
+            num_lines += len(lines)
+
     return infos, num_lines
 
 def update(val):
@@ -517,46 +570,55 @@ def key_press(event):
         janela.line_coords = []
 
 def select_frequency():
-
-    # Abre uma janela modal para o usuário selecionar um período (frequência) a partir de uma lista 
-    # pré-existente de períodos exibidos na tabela `freq_table`.
-
-    # Funcionalidade:
-    #     - Cria uma nova janela (`Toplevel`) contendo uma `Treeview` com colunas para:
-    #       - Ponto inicial (Initial X)
-    #       - Ponto final (Final X)
-    #       - Período (Frequency)
-    #     - Preenche a lista com os valores atuais da tabela global `freq_table`.
-    #     - Permite seleção única de um período.
-    #     - Ao clicar em "Select", a janela é fechada e o período selecionado é retornado.
-
-    # Retorno:
-    #     selected_freq (float ou None): Valor do período selecionado pelo usuário (coluna 'frequency').
-    #                                    Retorna `None` se nenhuma seleção for feita.
-
-    freq_window = tk.Toplevel(janela)
-    freq_window.title("Select Period")
+    """
+    Abre uma janela modal para o usuário selecionar um período (frequência) ou digitar manualmente.
     
+    Retorno:
+        selected_freq (float ou None): Valor do período selecionado ou digitado pelo usuário.
+    """
+    freq_window = tk.Toplevel(janela)
+    freq_window.title("Select Period / Enter Manually")
+    
+    # Label + Entry para entrada manual
+    tk.Label(freq_window, text="Digite manualmente um período (ms), ou selecione na lista:").pack(pady=5)
+    manual_entry = tk.Entry(freq_window)
+    manual_entry.pack(pady=5, fill=tk.X, padx=10)
+    
+    # Treeview com períodos existentes
     freq_list = ttk.Treeview(freq_window, columns=('initial_x', 'final_x', 'frequency'), show='headings')
-    freq_list.heading('initial_x', text = 'Initial X')
-    freq_list.heading('final_x', text = 'Final X')
-    freq_list.heading('frequency', text = 'Period')
-    freq_list.pack(fill = tk.BOTH, expand = True)
+    freq_list.heading('initial_x', text='Initial X')
+    freq_list.heading('final_x', text='Final X')
+    freq_list.heading('frequency', text='Period')
+    freq_list.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
     
     for child in freq_table.get_children():
         item = freq_table.item(child)
-        freq_list.insert("", tk.END, values = item['values'])
+        freq_list.insert("", tk.END, values=item['values'])
     
     selected_freq = []
-    
+
     def on_select():
-        selected_item = freq_list.selection()
-        if selected_item:
-            item = freq_list.item(selected_item)
-            selected_freq.append(item['values'][2])
+        # Verifica se algo foi digitado manualmente
+        manual_value = manual_entry.get().strip()
+        if manual_value != "":
+            try:
+                selected_freq.append(float(manual_value))
+                freq_window.destroy()
+                return
+            except ValueError:
+                tk.messagebox.showerror("Invalid Input", "Digite um número válido.")
+                return
+        
+        # Caso contrário, pega a seleção da lista
+        sel = freq_list.selection()
+        if sel:
+            item = freq_list.item(sel)
+            selected_freq.append(float(item['values'][2]))
             freq_window.destroy()
-    
-    select_button = tk.Button(freq_window, text = "Select", command=on_select)
+        else:
+            tk.messagebox.showwarning("No Selection", "Selecione um período ou digite manualmente.")
+
+    select_button = tk.Button(freq_window, text="Select", command=on_select)
     select_button.pack(pady=10)
     
     freq_window.wait_window()
@@ -868,6 +930,11 @@ def read_data(input_file):
 
     ind = -1
 
+    if ecg_mono:
+        header = head_mono
+    else: 
+        header = head
+
     section = None
     for line in data:
         if line.startswith("Num Lines:"):
@@ -895,12 +962,12 @@ def read_data(input_file):
             if section == "Num Lines":
                 num_lines = int(line)
             elif section == "Curves":
-                if line.split(":")[0] in head:
+                if line.split(":")[0] in header:
                     infos[line.split(":")[0]] = {'values': []}
                     ind += 1
                 else:
                     y_data = line
-                    infos[head[ind]]['values'].append(float(y_data))
+                    infos[header[ind]]['values'].append(float(y_data))
             elif section == "Period Data":
                 initial_x, final_x, interval = line.split(",")
                 freq_data.append((initial_x, final_x, interval))
@@ -1096,6 +1163,7 @@ def ecg_marker():
     global janela, fig, ax, xlim, freq_table, qrs_table, qt_table, extrasystole_table, arrhythmia_table, dx_var
     global message_label, scrollbar, num_lines, electrodes, clean_signal, output_dir, output_file, qrs_file, qt_file
     global apd_file, vel_file, arrhythmia_file, extrasystole_file, raw_data, input_file, textbox
+    global offset, ecg_mono
 
     parser = argparse.ArgumentParser(description = 'ECG Marker')
     parser.add_argument('-i', action = 'store', dest = 'input', required = False, help = 'Input')
@@ -1110,6 +1178,8 @@ def ecg_marker():
     parser.add_argument('--apd_file', action = 'store', dest = 'apd_file', required = False, default = 'apd_file.txt', help = 'Output file with estimated APD data')
     parser.add_argument('-r', action = 'store', dest = 'raw_data', required = False, default = 1, help = 'Raw Data (1) or not (0)')
     parser.add_argument('-c', action = 'store', dest = 'clean_signal', required = False, default = 0, help = 'Clean signal (1) or not (0)')
+    parser.add_argument('--ecg_mono', action = 'store', dest = 'ecg_mono', required = False, default = 0)
+    parser.add_argument('--offset', action = 'store', dest = 'offset', required = False, default = 1000)
 
     arguments = parser.parse_args()
 
@@ -1125,6 +1195,8 @@ def ecg_marker():
     raw_data = int(arguments.raw_data)
     input_file = int(arguments.input_file)
     clean_signal = int(arguments.clean_signal)
+    ecg_mono = int(arguments.ecg_mono)
+    offset = float(arguments.offset)
 
     electrodes = {}
     num_lines = 0
@@ -1132,8 +1204,11 @@ def ecg_marker():
     if raw_data:
         if input_file:
             electrodes, num_lines = read_file(input)
-        else:
-            electrodes, num_lines = read_dir(input)
+        else: 
+            if (ecg_mono == 0):
+                electrodes, num_lines = read_dir(input)
+            else:
+                electrodes, num_lines = read_dir_2(input)
     else:
         electrodes, num_lines, freq_data, qrs_data, qt_data, extrasystole_data, arrhythmia_data = read_data(input)
             
@@ -1151,7 +1226,7 @@ def ecg_marker():
 
     x = np.arange(0, num_lines)
 
-    offset = 0
+    offset_ = 0
     cont   = 0
 
     xlim = 1000
@@ -1161,9 +1236,9 @@ def ecg_marker():
 
     for electrode in electrodes:
         if (cont != 0):
-            offset += 1000
+            offset_ += offset
             # offset += max(electrodes[electrode]['values']) - min(electrodes[electrode]['values'])
-        ax.plot(x, np.array(electrodes[electrode]['values']) + offset, label = electrode)
+        ax.plot(x, np.array(electrodes[electrode]['values']) + offset_, label = electrode)
         # offset += max(electrodes[electrode]['values'])
         cont += 1
     ax.legend(loc = 'upper left')
@@ -1357,5 +1432,5 @@ def ecg_marker():
 
     janela.mainloop()
 
-# if __name__ == "__main__":
-#     ecg_marker()
+if __name__ == "__main__":
+    ecg_marker()
