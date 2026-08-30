@@ -14,10 +14,14 @@ import matplotlib.widgets as widgets
 import numpy as np
 import argparse
 import os
-import neurokit2 as nk
 import re
 import configparser
 import ast
+import sys
+
+# ecg_nn lives at the repo root, two levels up from this file (src/ecg_marker/).
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+from ecg_nn import Recording as _NNRecording
 
 DEFAULT_HEAD_FILE    = ['I', 'II', 'III', 'AVR', 'AVL', 'AVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6', 'HISp', 'HISd', 'VD p', 'VD 78', 'VD 56', 'VD 34', 'VD d']
 DEFAULT_HEAD         = ['VD d', 'I', 'II', 'III', 'AVR', 'AVL', 'AVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6']
@@ -630,212 +634,70 @@ def onclick (event):
 
 def automatic_period_marking ():
 
-    # Realiza a marcação automática de períodos cardíacos (R-peaks, QRS, QT) em sinais eletrocardiográficos (ECG)
-    # de múltiplos eletrodos selecionados.
+    # Marcação automática via a rede neural ecg_nn (MaskHeadV6 quando seu
+    # checkpoint está presente, senão o FiLM MaskHead) -- substitui a
+    # detecção antiga baseada em neurokit2 + mediana entre eletrodos.
 
     # Funcionalidade:
-    #     - Lê sinais de eletrodos definidos pelo usuário via `select_electrodes()`.
-    #     - (Opcional) Aplica limpeza do sinal com neurokit2 (`nk.ecg_clean`).
-    #     - Detecta automaticamente:
-    #         - Picos R (R-peaks)
-    #         - Inícios e finais de onda R (onsets e offsets)
-    #         - Finais de onda T
-    #     - Sincroniza as detecções entre diferentes eletrodos (alinhando picos similares no tempo).
-    #     - Calcula medianas das detecções para extrair batimentos representativos.
-    #     - Calcula parâmetros:
-    #         - Frequência cardíaca (intervalo RR)
-    #         - Duração do complexo QRS
-    #         - Intervalo QT
-    #     - Atualiza as tabelas gráficas (`freq_table`, `qrs_table`, `qt_table`) com os dados extraídos, vinculando
-    #       cada linha de QRS/QT (via freq_ref) ao índice da marcação de Período correspondente, de forma que um
-    #       reajuste manual (arraste) dessa marcação de Período propague automaticamente para QRS e QT.
-    #     - Mostra mensagens no rótulo da interface (`message_label`) indicando o progresso.
+    #     - Roda sobre todos os eletrodos carregados de uma vez só (o encoder
+    #       HuBERT do ecg_nn precisa do contexto das 12 derivações juntas, então
+    #       não há mais seleção de eletrodo por marcação).
+    #     - Para cada batimento detectado e não-ruidoso: adiciona uma linha de
+    #       Período (janela.freq, a partir do bcl do batimento) e uma linha de
+    #       QRS (janela.qrs, a partir do onset/duração previstos), ligadas via
+    #       freq_ref, no mesmo formato de tupla que os atalhos manuais 'F'/'R'
+    #       produzem -- assim o arraste manual dessas marcações continua
+    #       funcionando normalmente.
+    #     - QT não é preenchido: a inferência atual do ecg_nn não prevê
+    #       intervalo QT (mesma limitação em ambos os modelos, FiLM e v6).
 
-    signals = select_electrodes()
-
-    message_label.config(text = "Making Automatic Markings...")
+    message_label.config(text = "Running neural QRS detection (ecg_nn)...")
     message_label.update_idletasks()
 
-    electrodes_ecg_r_peaks   = []
-    electrodes_ecg_r_onsets  = []
-    electrodes_ecg_r_offsets = []
-    electrodes_ecg_t_offsets = []
+    leads = {name: np.array(data['values']) for name, data in electrodes.items()}
 
-    max_len = 0
+    try:
+        rec = _NNRecording.from_signal(leads, predict=True)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        message_label.config(text = f"ecg_nn inference failed: {e}")
+        return
 
-    for electrode in signals:
-        print(f'Electrode: {electrode}')
-
-        signal = electrodes[electrode]['values']
-
-        if (clean_signal):
-            signal = nk.ecg_clean(signal)
-
-        _, rpeaks = nk.ecg_peaks(signal)
-
-        ecg_r_peaks = rpeaks['ECG_R_Peaks']
-
-        signal_cwt, waves_cwt = nk.ecg_delineate(signal, rpeaks, method="cwt", show=True)
-
-        ecg_r_onsets  = waves_cwt['ECG_R_Onsets']
-        ecg_r_offsets = waves_cwt['ECG_R_Offsets']
-        ecg_t_offsets = waves_cwt['ECG_T_Offsets']
-
-        print(f'ECG_R_Peaks: {len(ecg_r_peaks)}, ECG_R_Onsets: {len(ecg_r_onsets)}, ECG_R_Offsets: {len(ecg_r_offsets)}, ECG_T_Offsets: {len(ecg_t_offsets)}')
-
-        if max_len < max(len(ecg_r_peaks), len(ecg_r_onsets), len(ecg_r_offsets), len(ecg_t_offsets)):
-            max_len = max(len(ecg_r_peaks), len(ecg_r_onsets), len(ecg_r_offsets), len(ecg_t_offsets))
-
-        electrodes_ecg_r_peaks.append(ecg_r_peaks)
-        electrodes_ecg_r_onsets.append(ecg_r_onsets)
-        electrodes_ecg_r_offsets.append(ecg_r_offsets)
-        electrodes_ecg_t_offsets.append(ecg_t_offsets)
-
-    new_electrodes_ecg_r_peaks   = np.zeros((len(signals), max_len))
-    new_electrodes_ecg_r_onsets  = np.zeros((len(signals), max_len))
-    new_electrodes_ecg_r_offsets = np.zeros((len(signals), max_len))
-    new_electrodes_ecg_t_offsets = np.zeros((len(signals), max_len))
-
-    loop = True
-
-    cont = np.zeros(len(signals))
-
-    cont_list = 0
-
-    while (loop):
-
-        valid_values = []
-
-        loop = False
-
-        for i in range(len(signals)):
-            if cont[i] < len(electrodes_ecg_r_peaks[i]):
-                loop = True
-                valid_values.append(electrodes_ecg_r_peaks[i][int(cont[i])])
-
-        if (loop == False):
-            break
-
-        # median_value = np.median(valid_values)
-        min_value = min(valid_values)
-
-        for i in range(len(signals)):
-            if (cont[i] < len(electrodes_ecg_r_peaks[i]) and abs(electrodes_ecg_r_peaks[i][int(cont[i])] - min_value) < 300):
-                new_electrodes_ecg_r_peaks[i, cont_list] = electrodes_ecg_r_peaks[i][int(cont[i])]
-                new_electrodes_ecg_r_onsets[i, cont_list] = (
-                    electrodes_ecg_r_onsets[i][int(cont[i])]
-                    if int(cont[i]) < len(electrodes_ecg_r_onsets[i])
-                    else np.nan
-                )
-                new_electrodes_ecg_r_offsets[i, cont_list] = (
-                    electrodes_ecg_r_offsets[i][int(cont[i])]
-                    if int(cont[i]) < len(electrodes_ecg_r_offsets[i])
-                    else np.nan
-                )
-                new_electrodes_ecg_t_offsets[i, cont_list] = (
-                    electrodes_ecg_t_offsets[i][int(cont[i])]
-                    if int(cont[i]) < len(electrodes_ecg_t_offsets[i])
-                    else np.nan
-                )
-                cont[i] += 1
-            else:
-                new_electrodes_ecg_r_peaks[i, cont_list] = np.nan
-                new_electrodes_ecg_r_onsets[i, cont_list] = np.nan
-                new_electrodes_ecg_r_offsets[i, cont_list] = np.nan
-                new_electrodes_ecg_t_offsets[i, cont_list] = np.nan
-
-        cont_list += 1
-
-        if cont_list >= max_len:
-            loop = False
-            break
-
-    for j in range(1, max_len):
-        median_r_peaks = np.nanmedian(new_electrodes_ecg_r_peaks[:, j])
-        median_r_peaks_last = np.nanmedian(new_electrodes_ecg_r_peaks[:, j - 1])
-        median_r_offsets = np.nanmedian(new_electrodes_ecg_r_offsets[:, j])
-        median_r_onsets = np.nanmedian(new_electrodes_ecg_r_onsets[:, j])
-        median_t_offsets = np.nanmedian(new_electrodes_ecg_t_offsets[:,j])
-
-        if (np.isnan(median_r_peaks) or np.isnan(median_r_peaks_last) or np.isnan(median_r_onsets) or np.isnan(median_r_offsets) or np.isnan(median_t_offsets)):
+    n_marked = 0
+    for beat in rec.beats:
+        if beat.noisy or beat.bcl is None or beat.qrs_start is None or beat.qrs_duration is None:
             continue
 
-        if (median_r_peaks - median_r_peaks_last > 1.1 * 600 or median_r_peaks - median_r_peaks_last < 0.7 * 200):
-            continue
+        initial_x   = f"{(beat.spike_idx - beat.bcl):.2f}"
+        final_x     = f"{beat.spike_idx:.2f}"
+        interval    = f"{beat.bcl:.2f}"
+        uncertainty = f"{uncertainty_value:.2f}"
 
-        # Índice que a marcação de Período recém-criada terá em janela.freq — usado para
-        # vincular (via freq_ref) as marcações de QRS e QT geradas a partir dela.
+        # Índice que a marcação de Período recém-criada terá em janela.freq —
+        # usado para vincular (via freq_ref) a marcação de QRS a ela.
         freq_idx = len(janela.freq)
+        janela.freq.append((initial_x, final_x, interval, uncertainty, initial_x, final_x))
 
-        janela.freq.append((median_r_peaks_last, median_r_peaks, median_r_peaks - median_r_peaks_last, uncertainty_value, median_r_peaks_last, median_r_peaks))
-        for i in freq_table.get_children():
-            freq_table.delete(i)
-        for f in janela.freq:
-            freq_table.insert("", tk.END, values = f)
+        qrs_start = f"{beat.qrs_start:.2f}"
+        qrs_end   = f"{(beat.qrs_start + beat.qrs_duration):.2f}"
+        qrs_dur   = f"{beat.qrs_duration:.2f}"
+        janela.qrs.append((qrs_start, qrs_end, interval, qrs_dur, uncertainty, qrs_start, qrs_end, freq_idx))
 
-        janela.qrs.append((median_r_onsets, median_r_offsets, median_r_peaks - median_r_peaks_last, median_r_offsets - median_r_onsets, uncertainty_value, median_r_onsets, median_r_offsets, freq_idx))
-        for i in qrs_table.get_children():
-            qrs_table.delete(i)
-        for q in janela.qrs:
-            qrs_table.insert("", tk.END, values = q)
+        n_marked += 1
 
-        janela.qt.append((median_r_onsets, median_t_offsets, median_r_peaks - median_r_peaks_last, median_t_offsets - median_r_onsets, uncertainty_value, median_r_onsets, median_t_offsets, freq_idx))
-        for i in qt_table.get_children():
-            qt_table.delete(i)
-        for q in janela.qt:
-            qt_table.insert("", tk.END, values = q)
+    for i in freq_table.get_children():
+        freq_table.delete(i)
+    for f in janela.freq:
+        freq_table.insert("", tk.END, values = f)
 
-    message_label.config(text = "Automatic Markings Completed Successfully.")
+    for i in qrs_table.get_children():
+        qrs_table.delete(i)
+    for q in janela.qrs:
+        qrs_table.insert("", tk.END, values = q)
+
+    message_label.config(text = f"Automatic Markings Completed ({n_marked} beats, ecg_nn).")
     message_label.update_idletasks()
-
-def select_electrodes ():
-
-    # Exibe uma janela gráfica para o usuário selecionar os eletrodos ECG que deseja analisar.
-
-    # Funcionalidade:
-    #     - Cria uma janela (`Toplevel`) com uma lista interativa de eletrodos.
-    #     - Permite múltiplas seleções na lista (`selectmode='extended'`).
-    #     - Caso o usuário selecione "All", retorna todos os eletrodos padrão.
-    #     - Caso contrário, retorna apenas os eletrodos escolhidos pelo usuário.
-
-    # Eletrodos disponíveis:
-    #     - 'All', 'I', 'II', 'III', 'AVR', 'AVL', 'AVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6'
-
-    # Retorno:
-    #     selected_electrode (list of str): Lista com os nomes dos eletrodos selecionados.
-    #                                       Se "All" for escolhido, retorna todos os eletrodos padrão.
-
-    electrodes_window = tk.Toplevel(janela)
-    electrodes_window.title("Select Electrodes")
-
-    electrode_list = ttk.Treeview(electrodes_window, columns=('Electrode'), show='headings', selectmode='extended')
-    electrode_list.heading('Electrode', text='Electrode')
-    electrode_list.pack(fill=tk.BOTH, expand=True)
-
-    electrodes = ['All','I', 'II', 'III', 'AVR', 'AVL', 'AVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6']
-    for electrode in electrodes:
-        electrode_list.insert("", tk.END, values=(electrode,))
-
-    selected_electrode = []
-
-    def on_select():
-        selected_items = electrode_list.selection()
-        if selected_items:
-            for selected_item in selected_items:
-                item = electrode_list.item(selected_item)
-                selected_electrode.append(item['values'][0])
-        electrodes_window.destroy()
-
-    select_button = tk.Button(electrodes_window, text="Select", command=on_select)
-    select_button.pack(pady=10)
-
-    electrodes_window.wait_window()
-
-    for signal in selected_electrode:
-        if (signal == "All"):
-            return ['I', 'II', 'III', 'AVR', 'AVL', 'AVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6']
-
-    return selected_electrode
 
 def key_press (event):
 
