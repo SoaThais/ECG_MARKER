@@ -35,6 +35,27 @@ DEFAULT_ECG_MONO     = 0
 DEFAULT_OFFSET       = 1000
 DEFAULT_UNCERTAINTY  = 15.0
 
+# ecg_nn: how automatic_period_marking() handles beats whose window overlaps
+# a neighbor's (see ecg_nn.recording.NOISY_BEAT_MODES for the full contract).
+# Changeable at runtime via the "ecg_nn ⚙" toolbar button.
+NOISY_BEAT_MODE_INFO = {
+    'recovery': ("Recovery (same as training)",
+                 "Try to rescue overlapping beats with a shifted/truncated window.\n"
+                 "Discards any that still fail recovery, or whose predicted QRS\n"
+                 "duration comes out under 100ms."),
+    'exclude':  ("Exclude",
+                 "Don't attempt recovery. Skip inference entirely for beats whose\n"
+                 "window overlaps a neighbor -- they get no QRS mark at all."),
+    'force':    ("Force",
+                 "Don't attempt recovery. Run inference on every beat with its\n"
+                 "plain, standard, R-peak-centered window regardless of overlap,\n"
+                 "and include all of them in the marking tables. Ones whose\n"
+                 "predicted QRS duration comes out under 100ms stay visible but\n"
+                 "get their uncertainty forced to 40ms -- flagged, not hidden."),
+}
+DEFAULT_NOISY_BEAT_MODE = 'recovery'
+noisy_beat_mode = DEFAULT_NOISY_BEAT_MODE
+
 # Configuração de cada tabela de marcação: em qual posição da tupla estão os campos
 # 'initial' (tempo inicial), 'final' (tempo final), 'duration' (duração/intervalo, recalculada
 # automaticamente ao arrastar uma marcação), 'uncertainty' (incerteza, em ms) e os campos
@@ -52,7 +73,13 @@ DEFAULT_UNCERTAINTY  = 15.0
 # freq_ref é None quando o período foi digitado manualmente (sem vínculo com nenhuma marcação).
 TABLE_FIELD_CONFIG = {
     'freq':         {'initial': 0, 'final': 1, 'duration': 2, 'uncertainty': 3, 'anchor_initial': 4, 'anchor_final': 5, 'list_attr': 'freq',         'table_name': 'freq_table'},
-    'qrs':          {'initial': 0, 'final': 1, 'duration': 3, 'uncertainty': 4, 'anchor_initial': 5, 'anchor_final': 6, 'list_attr': 'qrs',          'table_name': 'qrs_table'},
+    # 'uncertainty' (index 4) is the ONSET/start uncertainty; 'uncertainty_end' (index 8,
+    # appended after freq_ref so old files / other marking types are unaffected) is the
+    # OFFSET/end uncertainty -- for ecg_nn v6 QRS marks these are the model's own
+    # per-beat tau_on/tau_off, genuinely different. Optional: draw_marking_with_band
+    # falls back to symmetric (uncertainty for both ends) when it's absent, which is
+    # what manual 'R' entries and older saved files produce.
+    'qrs':          {'initial': 0, 'final': 1, 'duration': 3, 'uncertainty': 4, 'anchor_initial': 5, 'anchor_final': 6, 'uncertainty_end': 8, 'list_attr': 'qrs', 'table_name': 'qrs_table'},
     'qt':           {'initial': 0, 'final': 1, 'duration': 3, 'uncertainty': 4, 'anchor_initial': 5, 'anchor_final': 6, 'list_attr': 'qt',           'table_name': 'qt_table'},
     'extrasystole': {'initial': 0, 'final': 1, 'duration': 3, 'uncertainty': 4, 'anchor_initial': 5, 'anchor_final': 6, 'list_attr': 'extrasystole', 'table_name': 'extrasystole_table'},
     'arrhythmia':   {'initial': 0, 'final': 1, 'duration': 3, 'uncertainty': 4, 'anchor_initial': 5, 'anchor_final': 6, 'list_attr': 'arrhythmia',   'table_name': 'arrhythmia_table'},
@@ -180,13 +207,24 @@ def draw_marking_with_band (values, index, marking_type, color, label1, label2, 
     uncertainty = float(values[cfg['uncertainty']])
     half = uncertainty / 2.0
 
+    # Onset/offset uncertainty band width: symmetric (half from the single
+    # 'uncertainty' field) unless this marking type has a distinct end-side
+    # value (currently only QRS, index 8 -- appended after freq_ref so it's
+    # absent from manual entries and pre-existing saved files, which fall
+    # back to the symmetric case here).
+    end_uncertainty_idx = cfg.get('uncertainty_end')
+    if end_uncertainty_idx is not None and len(values) > end_uncertainty_idx:
+        half_end = float(values[end_uncertainty_idx]) / 2.0
+    else:
+        half_end = half
+
     # Os limites da faixa são calculados a partir dos valores ORIGINAIS (âncora), fixados no
     # momento em que a marcação foi criada — não a partir da posição atual da linha — para que
     # a faixa não se desloque quando a marcação for reajustada por arraste.
     anchor_initial = float(values[cfg['anchor_initial']])
     anchor_final = float(values[cfg['anchor_final']])
     initial_low, initial_high = anchor_initial - half, anchor_initial + half
-    final_low, final_high = anchor_final - half, anchor_final + half
+    final_low, final_high = anchor_final - half_end, anchor_final + half_end
 
     line1 = ax.axvline(initial_x, color = color, linestyle = '-', label = label1, linewidth = 1)
     line2 = ax.axvline(final_x, color = color, linestyle = '-', label = label2, linewidth = 1)
@@ -201,7 +239,7 @@ def draw_marking_with_band (values, index, marking_type, color, label1, label2, 
                                       'low': initial_low, 'high': initial_high, 'half': half,
                                       'color': color, 'band_label': band_label1, 'band_patch': band1}
     janela.draggable_lines[line2] = {'type': marking_type, 'index': index, 'field': 'final',
-                                      'low': final_low, 'high': final_high, 'half': half,
+                                      'low': final_low, 'high': final_high, 'half': half_end,
                                       'color': color, 'band_label': band_label2, 'band_patch': band2}
 
 def try_start_drag (event):
@@ -606,6 +644,8 @@ def center_view_on (x_center):
     start_index = max(0, min(start_index, max(0, num_lines - xlim)))
     scrollbar.set_val(start_index)
 
+    fig.canvas.draw_idle()
+
 def on_enter (event):
 
     # Altera o tamanho da janela de visualização (xlim) com base na entrada do usuário
@@ -676,6 +716,34 @@ def onclick (event):
             fig.canvas.draw()
             message_label.config(text = "Press 'F' to add Period, 'R' to add QRS, 'T' to add QT, 'E' to add extrasystole, 'A' to add arrhythmia or 'C' to cancel.")
 
+def open_ecg_nn_settings ():
+
+    # Janela de configuração do ecg_nn: escolhe o modo de tratamento de batimentos cujo
+    # janela sobrepõe a de um vizinho (ver ecg_nn.recording.NOISY_BEAT_MODES e
+    # NOISY_BEAT_MODE_INFO). O valor escolhido fica em `noisy_beat_mode` (global) e é lido
+    # por automatic_period_marking() a cada execução.
+
+    global noisy_beat_mode
+
+    win = tk.Toplevel(janela)
+    win.title("ecg_nn Settings")
+
+    tk.Label(win, text = "Noisy beat handling", font = ('Arial', 12, 'bold')).pack(anchor = 'w', padx = 12, pady = (12, 4))
+
+    mode_var = tk.StringVar(value = noisy_beat_mode)
+    for value in ('recovery', 'exclude', 'force'):
+        label, desc = NOISY_BEAT_MODE_INFO[value]
+        tk.Radiobutton(win, text = label, variable = mode_var, value = value, font = ('Arial', 10)).pack(anchor = 'w', padx = 12, pady = (8, 0))
+        tk.Label(win, text = desc, font = ('Arial', 8), fg = 'gray30', justify = 'left').pack(anchor = 'w', padx = 34)
+
+    def apply ():
+        global noisy_beat_mode
+        noisy_beat_mode = mode_var.get()
+        message_label.config(text = f"ecg_nn noisy-beat mode: {noisy_beat_mode}")
+        win.destroy()
+
+    tk.Button(win, text = "Apply", command = apply).pack(pady = 14)
+
 def automatic_period_marking ():
 
     # Marcação automática via a rede neural ecg_nn (MaskHeadV6 quando seu
@@ -686,47 +754,117 @@ def automatic_period_marking ():
     #     - Roda sobre todos os eletrodos carregados de uma vez só (o encoder
     #       HuBERT do ecg_nn precisa do contexto das 12 derivações juntas, então
     #       não há mais seleção de eletrodo por marcação).
-    #     - Para cada batimento detectado e não-ruidoso: adiciona uma linha de
-    #       Período (janela.freq, a partir do bcl do batimento) e uma linha de
-    #       QRS (janela.qrs, a partir do onset/duração previstos), ligadas via
-    #       freq_ref, no mesmo formato de tupla que os atalhos manuais 'F'/'R'
-    #       produzem -- assim o arraste manual dessas marcações continua
-    #       funcionando normalmente.
+    #     - Para cada batimento detectado e não-ruidoso, adiciona uma linha de
+    #       QRS (janela.qrs) a partir do onset/duração previstos -- um por
+    #       R-peak, incluindo o primeiro. Período (RR) exige dois R-peaks, então
+    #       o primeiro batimento não tem bcl (predecessor); nesse caso a linha
+    #       de Período correspondente é omitida e a QRS fica com freq_ref=None
+    #       (não vinculada), igual ao caso de período digitado manualmente.
+    #     - Formato de tupla igual ao que os atalhos manuais 'F'/'R' produzem --
+    #       assim o arraste manual continua funcionando normalmente.
     #     - QT não é preenchido: a inferência atual do ecg_nn não prevê
     #       intervalo QT (mesma limitação em ambos os modelos, FiLM e v6).
 
-    message_label.config(text = "Running neural QRS detection (ecg_nn)...")
+    # Block re-entry: a second click mid-run (e.g. because nothing seemed to
+    # be happening yet) would kick off a second, overlapping inference pass.
+    auto_mark_button['state'] = tk.DISABLED
+
+    message_label.config(text = "Loading ecg_nn model...")
     message_label.update_idletasks()
 
     leads = {name: np.array(data['values']) for name, data in electrodes.items()}
 
+    progress_bar['value'] = 0
+    progress_bar['mode'] = 'indeterminate'
+    progress_bar.start(10)
+    progress_bar.grid()
+    progress_bar.lift()
+
+    def _on_progress(stage, i, n):
+        if stage == 'loading_model':
+            message_label.config(text = "Loading ecg_nn model...")
+        elif stage == 'loading_encoder':
+            message_label.config(text = "Loading HuBERT-ECG encoder...")
+        elif stage == 'inference':
+            if str(progress_bar['mode']) != 'determinate':
+                progress_bar.stop()
+                progress_bar['mode'] = 'determinate'
+            progress_bar['maximum'] = max(n, 1)
+            progress_bar['value'] = i
+            message_label.config(text = f"Running neural QRS detection (ecg_nn)... {i}/{n} beats")
+        message_label.update_idletasks()
+        progress_bar.update_idletasks()
+
     try:
-        rec = _NNRecording.from_signal(leads, predict=True)
+        rec = _NNRecording.from_signal(leads, predict=True, progress_callback=_on_progress,
+                                        noisy_beat_mode=noisy_beat_mode)
     except Exception as e:
         import traceback
         traceback.print_exc()
         message_label.config(text = f"ecg_nn inference failed: {e}")
         return
+    finally:
+        progress_bar.stop()
+        progress_bar.grid_remove()
+        auto_mark_button['state'] = tk.NORMAL
 
+    # 'force' mode means every beat, including ones flagged noisy (window
+    # overlaps a neighbor), should show up in the marking tables -- 'recovery'
+    # and 'exclude' both still want noisy beats kept out (see
+    # open_ecg_nn_settings / NOISY_BEAT_MODE_INFO).
+    skip_noisy = noisy_beat_mode != 'force'
+
+    beats = rec.beats
     n_marked = 0
-    for beat in rec.beats:
-        if beat.noisy or beat.bcl is None or beat.qrs_start is None or beat.qrs_duration is None:
+    for i, beat in enumerate(beats):
+        if (skip_noisy and beat.noisy) or beat.qrs_start is None or beat.qrs_duration is None:
             continue
 
-        initial_x   = f"{(beat.spike_idx - beat.bcl):.2f}"
-        final_x     = f"{beat.spike_idx:.2f}"
-        interval    = f"{beat.bcl:.2f}"
-        uncertainty = f"{uncertainty_value:.2f}"
+        # Period (RR) has no model output backing it -- it's pure spike-to-spike
+        # arithmetic -- so its uncertainty stays the fixed config value.
+        period_uncertainty = f"{uncertainty_value:.2f}"
 
-        # Índice que a marcação de Período recém-criada terá em janela.freq —
-        # usado para vincular (via freq_ref) a marcação de QRS a ela.
-        freq_idx = len(janela.freq)
-        janela.freq.append((initial_x, final_x, interval, uncertainty, initial_x, final_x))
+        # QRS uncertainty: ecg_nn already derives real per-beat onset/offset
+        # values and stores them on the beat -- use them instead of the
+        # config constant. v6 is purely parametric: these ARE tau_on/tau_off,
+        # its own learned uncertainty, read straight from the model (no mask
+        # involved). FiLM (v4) has no such parameter, so this falls back to a
+        # mask threshold-crossing width for that model. Falls back further to
+        # the config value only if neither is available (e.g. FiLM's mask
+        # never crossed threshold). Kept genuinely separate (not averaged/
+        # maxed into one number) -- see TABLE_FIELD_CONFIG['qrs'].
+        if beat.qrs_start_uncert is not None:
+            qrs_uncertainty_on = f"{beat.qrs_start_uncert:.2f}"
+        else:
+            qrs_uncertainty_on = f"{uncertainty_value:.2f}"
+        if beat.qrs_end_uncert is not None:
+            qrs_uncertainty_off = f"{beat.qrs_end_uncert:.2f}"
+        else:
+            qrs_uncertainty_off = f"{uncertainty_value:.2f}"
+
+        if beat.bcl is not None:
+            # Normal case: this beat has a predecessor, so RR/period is defined.
+            interval  = f"{beat.bcl:.2f}"
+            initial_x = f"{(beat.spike_idx - beat.bcl):.2f}"
+            final_x   = f"{beat.spike_idx:.2f}"
+
+            # Índice que a marcação de Período recém-criada terá em janela.freq —
+            # usado para vincular (via freq_ref) a marcação de QRS a ela.
+            freq_idx = len(janela.freq)
+            janela.freq.append((initial_x, final_x, interval, period_uncertainty, initial_x, final_x))
+        else:
+            # First beat: no predecessor, so no RR interval to anchor a Period
+            # row to. Still emit its QRS mark (v6 gave it a real prediction) --
+            # borrow the following beat's RR as a display estimate for the
+            # 'frequency' column, same as a manually-typed, unlinked period.
+            freq_idx = None
+            interval = f"{beats[i + 1].bcl:.2f}" if (i + 1 < len(beats) and beats[i + 1].bcl is not None) else "0.00"
 
         qrs_start = f"{beat.qrs_start:.2f}"
         qrs_end   = f"{(beat.qrs_start + beat.qrs_duration):.2f}"
         qrs_dur   = f"{beat.qrs_duration:.2f}"
-        janela.qrs.append((qrs_start, qrs_end, interval, qrs_dur, uncertainty, qrs_start, qrs_end, freq_idx))
+        janela.qrs.append((qrs_start, qrs_end, interval, qrs_dur, qrs_uncertainty_on,
+                            qrs_start, qrs_end, freq_idx, qrs_uncertainty_off))
 
         n_marked += 1
 
@@ -803,7 +941,10 @@ def key_press (event):
             freq, freq_idx = select_frequency()
             if freq:
                 uncertainty = f"{uncertainty_value:.2f}"
-                janela.qrs.append((initial_x, final_x, freq, interval, uncertainty, initial_x, final_x, freq_idx))
+                # No model here to give a distinct offset uncertainty, so
+                # duplicate the single value -- symmetric band either way
+                # (see TABLE_FIELD_CONFIG['qrs']['uncertainty_end']).
+                janela.qrs.append((initial_x, final_x, freq, interval, uncertainty, initial_x, final_x, freq_idx, uncertainty))
                 for i in qrs_table.get_children():
                     qrs_table.delete(i)
                 for q in janela.qrs:
@@ -1121,7 +1262,11 @@ def save_data ():
         for item in qrs_table.get_children():
             values = qrs_table.item(item)['values']
             freq_ref = _format_freq_ref(values[FREQ_REF_INDEX] if len(values) > FREQ_REF_INDEX else None)
-            f.write(f"{values[0]}, {values[1]}, {values[2]}, {values[3]}, {values[4]}, {values[5]}, {values[6]}, {freq_ref}\n")
+            # 9th field: offset-side uncertainty (see TABLE_FIELD_CONFIG['qrs']['uncertainty_end']);
+            # defaults to the onset value (values[4]) for rows without it (manual entries always
+            # have it now too, but stay defensive for anything hand-edited).
+            uncertainty_end = values[8] if len(values) > 8 else values[4]
+            f.write(f"{values[0]}, {values[1]}, {values[2]}, {values[3]}, {values[4]}, {values[5]}, {values[6]}, {freq_ref}, {uncertainty_end}\n")
 
         f.write("QT Data:\n")
         for item in qt_table.get_children():
@@ -1179,23 +1324,33 @@ def save_data ():
     plt.ylabel("QT")
     plt.savefig("QT.png")
 
+    # Skip non-positive durations (e.g. v6 predicting t_off < t_on, clamped to
+    # 0 -- a real but invalid beat) instead of crashing on 1/0. Track period
+    # alongside velocity since skipped entries shift indices out of sync with
+    # janela.qrs.
     estimated_normalized_velocity = []
+    velocity_periods = []
 
     for qrs in janela.qrs:
-        estimated_normalized_velocity.append(1 / float(qrs[3]))
+        duration = float(qrs[3])
+        if duration <= 0:
+            continue
+        estimated_normalized_velocity.append(1 / duration)
+        velocity_periods.append(qrs[2])
 
-    max_value = max(estimated_normalized_velocity)
+    if estimated_normalized_velocity:
+        max_value = max(estimated_normalized_velocity)
 
-    for indice in range(len(estimated_normalized_velocity)):
-        estimated_normalized_velocity[indice] /= max_value
+        for indice in range(len(estimated_normalized_velocity)):
+            estimated_normalized_velocity[indice] /= max_value
 
     plt.figure()
 
     with open(output_dir + vel_file, 'w') as f:
         f.write("Period, Estimated Normalized Velocity\n")
         for indice in range(len(estimated_normalized_velocity)):
-            f.write(f"{janela.qrs[indice][2]}, {estimated_normalized_velocity[indice]}\n")
-            plt.plot(janela.qrs[indice][2], estimated_normalized_velocity[indice], 'bo')
+            f.write(f"{velocity_periods[indice]}, {estimated_normalized_velocity[indice]}\n")
+            plt.plot(velocity_periods[indice], estimated_normalized_velocity[indice], 'bo')
 
     plt.xlabel("Period")
     plt.ylabel("Estimated Normalized Velocity")
@@ -1329,7 +1484,11 @@ def read_data (input_file):
                 anchor_initial = parts[5] if len(parts) > 5 else initial_x
                 anchor_final = parts[6] if len(parts) > 6 else final_x
                 freq_ref = parse_freq_ref(parts)
-                qrs_data.append((initial_x, final_x, interval, qrs, uncertainty, anchor_initial, anchor_final, freq_ref))
+                # 9th field: offset-side uncertainty (tau_off for v6 marks). Files saved before
+                # this existed, or hand-edited ones missing it, fall back to the onset value --
+                # symmetric band either way, same as manual entries always produce.
+                uncertainty_end = parts[8] if len(parts) > 8 and parts[8] != '' else uncertainty
+                qrs_data.append((initial_x, final_x, interval, qrs, uncertainty, anchor_initial, anchor_final, freq_ref, uncertainty_end))
             elif section == "QT Data":
                 parts = [p.strip() for p in line.split(",")]
                 initial_x, final_x, interval, qt = parts[0], parts[1], parts[2], parts[3]
@@ -1471,10 +1630,22 @@ def plot_data ():
     ax_qrs.set_ylabel('Estimated Normalized Velocity')
     ax_qrs.set_title("Estimated Normalized Velocity x Period")
 
+    # Skip non-positive durations (e.g. v6 predicting t_off < t_on, clamped
+    # to 0 -- a real but invalid beat) instead of crashing on 1/0.
     estimated_normalized_velocity = []
+    velocity_periods = []
 
     for qrs in janela.qrs:
-        estimated_normalized_velocity.append(1 / float(qrs[3]))
+        duration = float(qrs[3])
+        if duration <= 0:
+            continue
+        estimated_normalized_velocity.append(1 / duration)
+        velocity_periods.append(float(qrs[2]))
+
+    if not estimated_normalized_velocity:
+        message_label.config(text = "No valid QRS durations to plot.")
+        plot_window.destroy()
+        return
 
     max_value = max(estimated_normalized_velocity)
 
@@ -1482,7 +1653,7 @@ def plot_data ():
         estimated_normalized_velocity[indice] /= max_value
 
     for indice in range(len(estimated_normalized_velocity)):
-        ax_qrs.plot(float(janela.qrs[indice][2]), estimated_normalized_velocity[indice], 'ro')
+        ax_qrs.plot(velocity_periods[indice], estimated_normalized_velocity[indice], 'ro')
 
     ax_qrs.legend()
     fig_qrs.savefig("Velocity.png")
@@ -1540,7 +1711,7 @@ def onmotion (event):
 def ecg_marker():
 
     global janela, fig, ax, xlim, freq_table, qrs_table, qt_table, extrasystole_table, arrhythmia_table, dx_var
-    global message_label, scrollbar, num_lines, electrodes, clean_signal, output_dir, output_file, qrs_file, qt_file
+    global message_label, progress_bar, auto_mark_button, scrollbar, num_lines, electrodes, clean_signal, output_dir, output_file, qrs_file, qt_file
     global apd_file, vel_file, arrhythmia_file, extrasystole_file, raw_data, input_file, textbox
     global offset, ecg_mono
     global head_mono, head, head_file, uncertainty_value
@@ -1620,8 +1791,27 @@ def ecg_marker():
     toolbar = tkagg.NavigationToolbar2Tk(canvas_widget, frame_left)
     toolbar.update()
 
+    # Parented to `toolbar` itself (a tk.Frame under the hood), not frame_left,
+    # so it appends to the same icon row as home/pan/zoom/etc. instead of
+    # landing on its own row.
+    ecg_nn_icon_path = os.path.join(os.path.dirname(__file__), 'icons', 'ecg_nn.png')
+    ecg_nn_icon = tk.PhotoImage(file = ecg_nn_icon_path)
+    # relief=FLAT + borderwidth=0 + highlightthickness=0: no visible box around
+    # the icon, matching the other (borderless) toolbar buttons.
+    ecg_nn_settings_button = tk.Button(toolbar, image = ecg_nn_icon, command = open_ecg_nn_settings,
+                                        relief = tk.FLAT, borderwidth = 0, highlightthickness = 0)
+    ecg_nn_settings_button.image = ecg_nn_icon  # keep a reference -- PhotoImage is GC'd otherwise
+    ecg_nn_settings_button.pack(side = tk.LEFT, padx = 4)
+
     message_label = tk.Label(janela, text = "", font = ('Arial', 12), background='white')
     message_label.grid(row = 0, column = 0, sticky = 'n', pady = 40, padx = 20)
+
+    # Centered directly under message_label. Hidden until
+    # automatic_period_marking() runs; lifted above frame_left's matplotlib
+    # canvas each time it's shown so it isn't painted over.
+    progress_bar = ttk.Progressbar(janela, orient = 'horizontal', mode = 'determinate', length = 250)
+    progress_bar.grid(row = 0, column = 0, sticky = 'n', pady = (75, 0))
+    progress_bar.grid_remove()
 
     frame_right = tk.Frame(janela)
     frame_right.grid(row = 0, column = 1, sticky = "nsew")
@@ -1640,8 +1830,8 @@ def ecg_marker():
     frame_right.rowconfigure(10, weight = 3)
     frame_right.rowconfigure(11, weight = 1)
 
-    freq_button = tk.Button(frame_right, text='Automatic Marking', command = automatic_period_marking)
-    freq_button.grid(row = 0, column = 2, columnspan = 4, padx = 20, pady = 10, ipadx = 20)
+    auto_mark_button = tk.Button(frame_right, text='Automatic Marking', command = automatic_period_marking)
+    auto_mark_button.grid(row = 0, column = 2, columnspan = 4, padx = 20, pady = 10, ipadx = 20)
 
     freq_name = tk.Label(frame_right, text = "Period", font = ('Arial', 16))
     freq_name.grid(column = 0, row = 1, columnspan = 4, padx = 2, pady = 2)
@@ -1667,19 +1857,37 @@ def ecg_marker():
     qrs_name = tk.Label(frame_right, text = "QRS", font = ('Arial', 16))
     qrs_name.grid(column = 0, row = 3, columnspan = 4, padx = 2, pady = 2)
 
-    qrs_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency', 'qrs', 'uncertainty'), show = 'headings', height = 5)
+    # `columns` must match the QRS data tuple positionally (see
+    # TABLE_FIELD_CONFIG['qrs']) since draw_marking_with_band and the save
+    # logic read anchor_initial/anchor_final/freq_ref straight back out of
+    # this widget's item values -- ttk.Treeview maps values to columns by
+    # position, not by name, so the hidden fields must still occupy their
+    # real slots. `displaycolumns` then picks which ones are actually shown,
+    # in whatever visual order we want (here: skipping the 3 internal-only
+    # anchor/freq_ref fields).
+    # 'uncertainty' = onset-side (tau_on for v6); 'uncertainty_end' = offset-side (tau_off for
+    # v6, symmetric duplicate of 'uncertainty' for manual entries / older saved files -- see
+    # TABLE_FIELD_CONFIG['qrs'] and draw_marking_with_band).
+    qrs_table = ttk.Treeview(
+        frame_right,
+        columns = ('initial_x', 'final_x', 'frequency', 'qrs', 'uncertainty',
+                   'anchor_initial', 'anchor_final', 'freq_ref', 'uncertainty_end'),
+        displaycolumns = ('initial_x', 'final_x', 'frequency', 'qrs', 'uncertainty', 'uncertainty_end'),
+        show = 'headings', height = 5)
     qrs_table.grid(row = 4, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
     qrs_table.heading('initial_x', text = 'Initial X')
     qrs_table.heading('final_x', text = 'Final X')
     qrs_table.heading('frequency', text = 'Period')
     qrs_table.heading('qrs', text = 'QRS')
-    qrs_table.heading('uncertainty', text = 'Uncertainty (ms)', command = make_sort_handler('qrs', 'uncertainty'))
+    qrs_table.heading('uncertainty', text = 'Unc. On (ms)', command = make_sort_handler('qrs', 'uncertainty'))
+    qrs_table.heading('uncertainty_end', text = 'Unc. Off (ms)')
 
     qrs_table.column('initial_x', width = 100, anchor = 'center')
     qrs_table.column('final_x', width = 100, anchor = 'center')
     qrs_table.column('frequency', width = 100, anchor = 'center')
     qrs_table.column('qrs', width = 100, anchor = 'center')
-    qrs_table.column('uncertainty', width = 110, anchor = 'center')
+    qrs_table.column('uncertainty', width = 100, anchor = 'center')
+    qrs_table.column('uncertainty_end', width = 100, anchor = 'center')
 
     scrollbar_vertical_qrs = tk.Scrollbar(frame_right, orient='vertical', command=qrs_table.yview)
     scrollbar_vertical_qrs.grid(row=4, column=4, sticky='ns')

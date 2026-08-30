@@ -45,6 +45,10 @@ class Beat:
         self.qt_interval          = None
         self.qt_start             = None       # absolute ms position of QT onset
         self.noisy        = False              # True if window overlaps another beat
+        self.was_noisy    = False              # noisy right after mark_noisy_beats(), before
+                                                # any recovery attempt -- unlike `noisy`, this
+                                                # never gets reset, so it still distinguishes a
+                                                # recovered beat from one that was always clean
         self.source       = None               # filepath this beat was extracted from
 
         self.context_window   = None          # (n_leads, CONTEXT_PRE+CONTEXT_POST) — 5 s centred on spike
@@ -90,6 +94,7 @@ def mark_noisy_beats(beats):
             lo_j, hi_j = intervals[j]
             if lo_i < hi_j and hi_i > lo_j:   # intervals overlap
                 beat.noisy = True
+                beat.was_noisy = True
                 break
     return beats
 
