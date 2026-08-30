@@ -191,11 +191,18 @@ def draw_marking_with_band (values, index, marking_type, color, label1, label2, 
     line1 = ax.axvline(initial_x, color = color, linestyle = '-', label = label1, linewidth = 1)
     line2 = ax.axvline(final_x, color = color, linestyle = '-', label = label2, linewidth = 1)
 
-    ax.axvspan(initial_low, initial_high, color = color, alpha = 0.15, label = band_label1)
-    ax.axvspan(final_low, final_high, color = color, alpha = 0.15, label = band_label2)
+    band1 = ax.axvspan(initial_low, initial_high, color = color, alpha = 0.15, label = band_label1)
+    band2 = ax.axvspan(final_low, final_high, color = color, alpha = 0.15, label = band_label2)
 
-    janela.draggable_lines[line1] = {'type': marking_type, 'index': index, 'field': 'initial', 'low': initial_low, 'high': initial_high}
-    janela.draggable_lines[line2] = {'type': marking_type, 'index': index, 'field': 'final', 'low': final_low, 'high': final_high}
+    # 'half'/'color'/'band_label' + 'band_patch' let on_release_drag recenter the band
+    # around wherever the user drops the line (see that function) -- the band's WIDTH
+    # never changes, only its center, and each release moves it a bit further.
+    janela.draggable_lines[line1] = {'type': marking_type, 'index': index, 'field': 'initial',
+                                      'low': initial_low, 'high': initial_high, 'half': half,
+                                      'color': color, 'band_label': band_label1, 'band_patch': band1}
+    janela.draggable_lines[line2] = {'type': marking_type, 'index': index, 'field': 'final',
+                                      'low': final_low, 'high': final_high, 'half': half,
+                                      'color': color, 'band_label': band_label2, 'band_patch': band2}
 
 def try_start_drag (event):
 
@@ -237,6 +244,13 @@ def on_release_drag (event):
 
     # Finaliza a operação de arraste: confirma a nova posição da marcação, atualizando a lista
     # de dados interna e a linha correspondente na tabela (Treeview).
+    #
+    # Também RECENTRA a faixa de incerteza na posição onde o mouse foi solto: a largura
+    # (info['half']) não muda, só o centro. Isso vale tanto para os novos limites 'low'/'high'
+    # (usados por update_drag para restringir o próximo arraste) quanto para a faixa sombreada
+    # desenhada no gráfico -- o patch antigo é removido e um novo é desenhado na posição nova.
+    # Resultado: soltar o mouse uma vez trava o arraste seguinte nessa faixa recentrada, mas o
+    # usuário pode soltar de novo (e de novo) para continuar avançando além da faixa original.
 
     if janela.dragging_line is None:
         return
@@ -244,6 +258,17 @@ def on_release_drag (event):
     info = janela.dragging_info
     new_x = janela.dragging_line.get_xdata()[0]
     commit_drag_value(info['type'], info['index'], info['field'], new_x)
+
+    half = info['half']
+    new_low, new_high = new_x - half, new_x + half
+    info['low'] = new_low
+    info['high'] = new_high
+
+    old_patch = info.get('band_patch')
+    if old_patch is not None:
+        old_patch.remove()
+    info['band_patch'] = ax.axvspan(new_low, new_high, color = info['color'], alpha = 0.15,
+                                     label = info['band_label'])
 
     janela.dragging_line = None
     janela.dragging_info = None
@@ -254,6 +279,12 @@ def commit_drag_value (marking_type, index, field, new_x):
     # Grava o novo valor (tempo inicial ou final) de uma marcação após o usuário arrastar a linha
     # dentro da faixa de incerteza, recalculando o campo de duração/intervalo e atualizando a
     # linha correspondente na tabela (Treeview).
+    #
+    # Também recentra a âncora (anchor_initial/anchor_final) do lado arrastado na nova posição --
+    # ao contrário do comportamento anterior (âncora fixa no valor de criação), isso permite que
+    # cada soltura do mouse desloque a faixa de incerteza, possibilitando arrastar progressivamente
+    # além da faixa original em soltadas sucessivas (ver on_release_drag, que também reposiciona a
+    # faixa sombreada e os limites 'low'/'high' correspondentes).
     #
     # Quando a marcação arrastada é do tipo 'freq' (Período), o novo valor de duração
     # (o período recalculado) é propagado para todas as tabelas dependentes de período
@@ -267,6 +298,9 @@ def commit_drag_value (marking_type, index, field, new_x):
     row = list(data_list[index])
     field_index = cfg['initial'] if field == 'initial' else cfg['final']
     row[field_index] = f"{new_x:.2f}"
+
+    anchor_field_index = cfg['anchor_initial'] if field == 'initial' else cfg['anchor_final']
+    row[anchor_field_index] = f"{new_x:.2f}"
 
     initial_x = float(row[cfg['initial']])
     final_x = float(row[cfg['final']])
@@ -561,6 +595,16 @@ def update (val):
         ax.set_xlim(start_index - xlim, start_index)
 
     fig.canvas.draw_idle()
+
+def center_view_on (x_center):
+
+    # Centra a visualização (mesma largura atual, `xlim`) em torno de x_center, e sincroniza a
+    # barra de rolagem para refletir a nova posição -- chamado ao selecionar uma marcação em
+    # qualquer tabela, para que o trecho do sinal correspondente fique visível automaticamente.
+
+    start_index = x_center - xlim / 2.0
+    start_index = max(0, min(start_index, max(0, num_lines - xlim)))
+    scrollbar.set_val(start_index)
 
 def on_enter (event):
 
@@ -920,10 +964,13 @@ def freq_selected (event):
 
     clear_markers(['freq_1', 'freq_2'], ['freq_band_1', 'freq_band_2'])
     clear_draggable('freq')
-    for selected_freq in freq_table.selection():
+    cfg = TABLE_FIELD_CONFIG['freq']
+    for i, selected_freq in enumerate(freq_table.selection()):
         item = freq_table.item(selected_freq)
         index = freq_table.index(selected_freq)
         draw_marking_with_band(item['values'], index, 'freq', 'green', 'freq_1', 'freq_2', 'freq_band_1', 'freq_band_2')
+        if i == 0:
+            center_view_on((float(item['values'][cfg['initial']]) + float(item['values'][cfg['final']])) / 2.0)
     fig.canvas.draw()
 
 def qrs_selected (event):
@@ -941,10 +988,13 @@ def qrs_selected (event):
 
     clear_markers(['qrs_1', 'qrs_2'], ['qrs_band_1', 'qrs_band_2'])
     clear_draggable('qrs')
-    for selected_qrs in qrs_table.selection():
+    cfg = TABLE_FIELD_CONFIG['qrs']
+    for i, selected_qrs in enumerate(qrs_table.selection()):
         item = qrs_table.item(selected_qrs)
         index = qrs_table.index(selected_qrs)
         draw_marking_with_band(item['values'], index, 'qrs', 'purple', 'qrs_1', 'qrs_2', 'qrs_band_1', 'qrs_band_2')
+        if i == 0:
+            center_view_on((float(item['values'][cfg['initial']]) + float(item['values'][cfg['final']])) / 2.0)
     fig.canvas.draw()
 
 def qt_selected (event):
@@ -962,10 +1012,13 @@ def qt_selected (event):
 
     clear_markers(['qt_1', 'qt_2'], ['qt_band_1', 'qt_band_2'])
     clear_draggable('qt')
-    for selected_qt in qt_table.selection():
+    cfg = TABLE_FIELD_CONFIG['qt']
+    for i, selected_qt in enumerate(qt_table.selection()):
         item = qt_table.item(selected_qt)
         index = qt_table.index(selected_qt)
         draw_marking_with_band(item['values'], index, 'qt', 'orange', 'qt_1', 'qt_2', 'qt_band_1', 'qt_band_2')
+        if i == 0:
+            center_view_on((float(item['values'][cfg['initial']]) + float(item['values'][cfg['final']])) / 2.0)
     fig.canvas.draw()
 
 def extrasystole_selected (event):
@@ -983,10 +1036,13 @@ def extrasystole_selected (event):
 
     clear_markers(['extrasystole_1', 'extrasystole_2'], ['extrasystole_band_1', 'extrasystole_band_2'])
     clear_draggable('extrasystole')
-    for selected_extrasystole in extrasystole_table.selection():
+    cfg = TABLE_FIELD_CONFIG['extrasystole']
+    for i, selected_extrasystole in enumerate(extrasystole_table.selection()):
         item = extrasystole_table.item(selected_extrasystole)
         index = extrasystole_table.index(selected_extrasystole)
         draw_marking_with_band(item['values'], index, 'extrasystole', 'yellow', 'extrasystole_1', 'extrasystole_2', 'extrasystole_band_1', 'extrasystole_band_2')
+        if i == 0:
+            center_view_on((float(item['values'][cfg['initial']]) + float(item['values'][cfg['final']])) / 2.0)
     fig.canvas.draw()
 
 def arrhythmia_selected (event):
@@ -1004,10 +1060,13 @@ def arrhythmia_selected (event):
 
     clear_markers(['arrhythmia_1', 'arrhythmia_2'], ['arrhythmia_band_1', 'arrhythmia_band_2'])
     clear_draggable('arrhythmia')
-    for selected_arrhythmia in arrhythmia_table.selection():
+    cfg = TABLE_FIELD_CONFIG['arrhythmia']
+    for i, selected_arrhythmia in enumerate(arrhythmia_table.selection()):
         item = arrhythmia_table.item(selected_arrhythmia)
         index = arrhythmia_table.index(selected_arrhythmia)
         draw_marking_with_band(item['values'], index, 'arrhythmia', 'pink', 'arrhythmia_1', 'arrhythmia_2', 'arrhythmia_band_1', 'arrhythmia_band_2')
+        if i == 0:
+            center_view_on((float(item['values'][cfg['initial']]) + float(item['values'][cfg['final']])) / 2.0)
     fig.canvas.draw()
 
 def _format_freq_ref (freq_ref):
