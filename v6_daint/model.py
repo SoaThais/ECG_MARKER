@@ -94,7 +94,7 @@ class MaskHeadV6(nn.Module):
                  tau_cap=None, tau_floor=1.0, tau_c_init_on=1.0, tau_c_init_off=10.0,
                  tau_detach=True, offset_prior=True, no_compress=False,
                  compress_mode='full', detach_routing=False, center_context=False, use_ste=False,
-                 feature_pool=False, **kwargs):
+                 feature_pool=False, tau_arch='mlp64', tau_feats='all', **kwargs):
         super().__init__()
         if window_size is None:
             from base.beat import WINDOW_PRE, WINDOW_POST
@@ -111,6 +111,8 @@ class MaskHeadV6(nn.Module):
         self.center_context   = center_context
         self.use_ste          = use_ste
         self.feature_pool     = feature_pool
+        self.tau_arch         = tau_arch
+        self.tau_feats        = tau_feats
         if feature_pool and detach_routing:
             raise ValueError('--detach_routing is incompatible with --feature_pool: it would cut '
                              'the backbone off from the pooled loss, removing the contamination '
@@ -190,14 +192,39 @@ class MaskHeadV6(nn.Module):
         # normalized entropies sit near 0.5, so without standardization a single
         # Kaiming-init layer cannot see var_t at all -- same reasoning now applies
         # to mixing the raw 5 scalars with the learned 256+64 embeddings.
-        TAU_IN = 5 + 256 + 64
+        # Which blocks reach the tau head. 'no_hubert' drops the routing
+        # embedding built from the HuBERT weights; 'hand' keeps only the 5
+        # attention-dispersion scalars.
+        if tau_feats == 'all':
+            TAU_IN = 5 + 256 + 64
+        elif tau_feats == 'no_hubert':
+            TAU_IN = 5 + 256
+        elif tau_feats == 'hand':
+            TAU_IN = 5
+        else:
+            raise ValueError('unknown tau_feats: %r' % tau_feats)
 
         def _make_tau_head():
-            return nn.Sequential(
-                nn.BatchNorm1d(TAU_IN),
-                nn.Linear(TAU_IN, 64), nn.GELU(),
-                nn.Linear(64, 1),
-            )
+            if tau_arch == 'mlp64':
+                return nn.Sequential(
+                    nn.BatchNorm1d(TAU_IN),
+                    nn.Linear(TAU_IN, 64), nn.GELU(),
+                    nn.Linear(64, 1),
+                )
+            if tau_arch == 'mlp16':
+                return nn.Sequential(
+                    nn.BatchNorm1d(TAU_IN),
+                    nn.Linear(TAU_IN, 16), nn.GELU(),
+                    nn.Linear(16, 1),
+                )
+            if tau_arch == 'linear':
+                # The closest analogue of the ridge probe that generalised to an
+                # unseen patient: one standardised linear map, no hidden layer.
+                return nn.Sequential(
+                    nn.BatchNorm1d(TAU_IN),
+                    nn.Linear(TAU_IN, 1),
+                )
+            raise ValueError('unknown tau_arch: %r' % tau_arch)
 
         self.onset_tau_head  = _make_tau_head()
         self.offset_tau_head = _make_tau_head()
@@ -224,8 +251,11 @@ class MaskHeadV6(nn.Module):
         # so W2 gets gradient immediately and W1 unblocks as soon as W2 leaves
         # zero, while out == 0 still holds at t=0.
         for head in (self.onset_tau_head, self.offset_tau_head):
-            nn.init.zeros_(head[3].weight)
-            nn.init.zeros_(head[3].bias)
+            # Zero the LAST Linear whatever the depth, so tau_b == 0 at t=0 and
+            # tau starts exactly at tau_c for every architecture.
+            _last = max(i for i, m in enumerate(head) if isinstance(m, nn.Linear))
+            nn.init.zeros_(head[_last].weight)
+            nn.init.zeros_(head[_last].bias)
 
         t = torch.arange(window_size, dtype=torch.float32).unsqueeze(0)
         self.register_buffer('t_grid', t)
@@ -298,7 +328,13 @@ class MaskHeadV6(nn.Module):
         feat_lead = lead_compressor(self._maybe_detach(h_leads))    # (N,256)
         feat_hub  = routing_compressor(self._maybe_detach(w))       # (N,64)
 
-        feat    = torch.cat([feat_lead, feat_hub, hand_feat], dim=-1)  # (N,325)
+        if self.tau_feats == 'all':
+            _parts = [feat_lead, feat_hub, hand_feat]
+        elif self.tau_feats == 'no_hubert':
+            _parts = [feat_lead, hand_feat]
+        else:
+            _parts = [hand_feat]
+        feat    = torch.cat(_parts, dim=-1)   # hand_feat is always last
         tau_b   = tau_head(feat)[:, 0]           # per-beat deviation, 0 at t=0
         tau     = (tau_c + tau_b).clamp(min=1.0)  # safety floor only -- tau_c carries the prior
         if self.tau_cap is not None:
