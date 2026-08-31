@@ -1,0 +1,12 @@
+# Local-only dev tooling (slicing script + generated test data) -- never committed
+dev/
+
+# Build artifacts
+__pycache__/
+*.egg-info/
+
+# Plots the app writes to CWD on save/plot (QRS.png, QT.png, Velocity.png, APD.png)
+/QRS.png
+/QT.png
+/Velocity.png
+/APD.png

@@ -637,14 +637,54 @@ def update (val):
 def center_view_on (x_center):
 
     # Centra a visualização (mesma largura atual, `xlim`) em torno de x_center, e sincroniza a
-    # barra de rolagem para refletir a nova posição -- chamado ao selecionar uma marcação em
-    # qualquer tabela, para que o trecho do sinal correspondente fique visível automaticamente.
+    # barra de rolagem para refletir a nova posição -- usado quando exatamente UMA marcação está
+    # selecionada, para que o zoom atual do usuário não seja alterado.
 
     start_index = x_center - xlim / 2.0
     start_index = max(0, min(start_index, max(0, num_lines - xlim)))
     scrollbar.set_val(start_index)
 
     fig.canvas.draw_idle()
+
+def fit_view_to_range (range_min, range_max):
+
+    # Ajusta o ZOOM (largura da janela de visualização, `xlim`) para que a faixa
+    # [range_min, range_max] fique inteiramente visível, com uma margem de folga em cada lado,
+    # e sincroniza a barra de rolagem -- usado quando MAIS DE UMA marcação está selecionada
+    # simultaneamente, para que todas fiquem visíveis ao mesmo tempo (ao contrário da seleção
+    # única, aqui o zoom atual é intencionalmente alterado).
+
+    global xlim
+    span = max(range_max - range_min, 1.0)
+    margin = max(span * 0.1, 20.0)  # at least 20ms of breathing room on each side
+    xlim = min(span + 2 * margin, num_lines)
+
+    start_index = range_min - margin
+    start_index = max(0, min(start_index, max(0, num_lines - xlim)))
+    scrollbar.set_val(start_index)
+
+    fig.canvas.draw_idle()
+
+def center_or_fit_view (values_list, cfg):
+
+    # Ponto único de decisão entre as duas funções acima: uma marcação selecionada -> centraliza
+    # sem alterar o zoom (center_view_on); mais de uma -> ajusta o zoom para mostrar todas
+    # (fit_view_to_range), usando o mínimo de 'initial' e o máximo de 'final' entre as selecionadas.
+
+    # Parâmetros:
+    #     values_list: lista de tuplas `values` (uma por linha selecionada na tabela).
+    #     cfg: TABLE_FIELD_CONFIG[marking_type] correspondente.
+
+    if not values_list:
+        return
+
+    if len(values_list) == 1:
+        v = values_list[0]
+        center_view_on((float(v[cfg['initial']]) + float(v[cfg['final']])) / 2.0)
+    else:
+        all_initial = [float(v[cfg['initial']]) for v in values_list]
+        all_final   = [float(v[cfg['final']]) for v in values_list]
+        fit_view_to_range(min(all_initial), max(all_final))
 
 def on_enter (event):
 
@@ -1106,12 +1146,13 @@ def freq_selected (event):
     clear_markers(['freq_1', 'freq_2'], ['freq_band_1', 'freq_band_2'])
     clear_draggable('freq')
     cfg = TABLE_FIELD_CONFIG['freq']
-    for i, selected_freq in enumerate(freq_table.selection()):
+    values_list = []
+    for selected_freq in freq_table.selection():
         item = freq_table.item(selected_freq)
         index = freq_table.index(selected_freq)
         draw_marking_with_band(item['values'], index, 'freq', 'green', 'freq_1', 'freq_2', 'freq_band_1', 'freq_band_2')
-        if i == 0:
-            center_view_on((float(item['values'][cfg['initial']]) + float(item['values'][cfg['final']])) / 2.0)
+        values_list.append(item['values'])
+    center_or_fit_view(values_list, cfg)
     fig.canvas.draw()
 
 def qrs_selected (event):
@@ -1130,12 +1171,13 @@ def qrs_selected (event):
     clear_markers(['qrs_1', 'qrs_2'], ['qrs_band_1', 'qrs_band_2'])
     clear_draggable('qrs')
     cfg = TABLE_FIELD_CONFIG['qrs']
-    for i, selected_qrs in enumerate(qrs_table.selection()):
+    values_list = []
+    for selected_qrs in qrs_table.selection():
         item = qrs_table.item(selected_qrs)
         index = qrs_table.index(selected_qrs)
         draw_marking_with_band(item['values'], index, 'qrs', 'purple', 'qrs_1', 'qrs_2', 'qrs_band_1', 'qrs_band_2')
-        if i == 0:
-            center_view_on((float(item['values'][cfg['initial']]) + float(item['values'][cfg['final']])) / 2.0)
+        values_list.append(item['values'])
+    center_or_fit_view(values_list, cfg)
     fig.canvas.draw()
 
 def qt_selected (event):
@@ -1154,12 +1196,13 @@ def qt_selected (event):
     clear_markers(['qt_1', 'qt_2'], ['qt_band_1', 'qt_band_2'])
     clear_draggable('qt')
     cfg = TABLE_FIELD_CONFIG['qt']
-    for i, selected_qt in enumerate(qt_table.selection()):
+    values_list = []
+    for selected_qt in qt_table.selection():
         item = qt_table.item(selected_qt)
         index = qt_table.index(selected_qt)
         draw_marking_with_band(item['values'], index, 'qt', 'orange', 'qt_1', 'qt_2', 'qt_band_1', 'qt_band_2')
-        if i == 0:
-            center_view_on((float(item['values'][cfg['initial']]) + float(item['values'][cfg['final']])) / 2.0)
+        values_list.append(item['values'])
+    center_or_fit_view(values_list, cfg)
     fig.canvas.draw()
 
 def extrasystole_selected (event):
@@ -1178,12 +1221,13 @@ def extrasystole_selected (event):
     clear_markers(['extrasystole_1', 'extrasystole_2'], ['extrasystole_band_1', 'extrasystole_band_2'])
     clear_draggable('extrasystole')
     cfg = TABLE_FIELD_CONFIG['extrasystole']
-    for i, selected_extrasystole in enumerate(extrasystole_table.selection()):
+    values_list = []
+    for selected_extrasystole in extrasystole_table.selection():
         item = extrasystole_table.item(selected_extrasystole)
         index = extrasystole_table.index(selected_extrasystole)
         draw_marking_with_band(item['values'], index, 'extrasystole', 'yellow', 'extrasystole_1', 'extrasystole_2', 'extrasystole_band_1', 'extrasystole_band_2')
-        if i == 0:
-            center_view_on((float(item['values'][cfg['initial']]) + float(item['values'][cfg['final']])) / 2.0)
+        values_list.append(item['values'])
+    center_or_fit_view(values_list, cfg)
     fig.canvas.draw()
 
 def arrhythmia_selected (event):
@@ -1202,12 +1246,13 @@ def arrhythmia_selected (event):
     clear_markers(['arrhythmia_1', 'arrhythmia_2'], ['arrhythmia_band_1', 'arrhythmia_band_2'])
     clear_draggable('arrhythmia')
     cfg = TABLE_FIELD_CONFIG['arrhythmia']
-    for i, selected_arrhythmia in enumerate(arrhythmia_table.selection()):
+    values_list = []
+    for selected_arrhythmia in arrhythmia_table.selection():
         item = arrhythmia_table.item(selected_arrhythmia)
         index = arrhythmia_table.index(selected_arrhythmia)
         draw_marking_with_band(item['values'], index, 'arrhythmia', 'pink', 'arrhythmia_1', 'arrhythmia_2', 'arrhythmia_band_1', 'arrhythmia_band_2')
-        if i == 0:
-            center_view_on((float(item['values'][cfg['initial']]) + float(item['values'][cfg['final']])) / 2.0)
+        values_list.append(item['values'])
+    center_or_fit_view(values_list, cfg)
     fig.canvas.draw()
 
 def _format_freq_ref (freq_ref):
