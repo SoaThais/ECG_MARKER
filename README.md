@@ -129,6 +129,8 @@ python3 ./src/ecg_marker/ecg_marker.py  -i ./output/ecg_data.txt -r 0
 
 ## Neural automatic marking (ecg_nn)
 
+Trained in [ybwerneck/QRS_Detector](https://github.com/ybwerneck/QRS_Detector/tree/main).
+
 Automatic QRS marking runs on a neural model (`ecg_nn/`) instead of `neurokit2`.
 Click **Automatic Marking** in the GUI, or the **ecg_nn ⚙** button (next to the
 plot toolbar) to change how it behaves:
