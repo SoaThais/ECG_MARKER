@@ -13,6 +13,8 @@ import matplotlib.backends.backend_tkagg as tkagg
 import matplotlib.widgets as widgets
 import numpy as np
 import argparse
+import queue
+import threading
 import os
 import re
 import configparser
@@ -838,34 +840,85 @@ def automatic_period_marking ():
     progress_bar.grid()
     progress_bar.lift()
 
-    def _on_progress(stage, i, n):
-        if stage == 'loading_model':
-            message_label.config(text = "Loading model")
-        elif stage == 'loading_encoder':
-            message_label.config(text = "Loading HuBERT-ECG encoder")
-        elif stage == 'inference':
-            if str(progress_bar['mode']) != 'determinate':
-                progress_bar.stop()
-                progress_bar['mode'] = 'determinate'
-            progress_bar['maximum'] = max(n, 1)
-            progress_bar['value'] = i
-            message_label.config(text = f"Running neural QRS detection: {i}/{n} beats")
-        message_label.update_idletasks()
-        progress_bar.update_idletasks()
+    # Inference runs on a WORKER THREAD, not here. The three expensive steps
+    # (bundle load, HuBERT load, and torch.compile's first forward) emit no
+    # progress between them, so running them on the Tk thread froze the
+    # window solid -- update_idletasks() only repaints when it is reached,
+    # and nothing reaches it for the duration of a single library call.
+    #
+    # Threads, not a subprocess: those steps are dominated by file I/O,
+    # tensor copies and the inductor compile, all of which release the GIL,
+    # so a plain thread really does keep the UI responsive. A subprocess
+    # could not hold the model for us anyway -- a live CUDA model cannot be
+    # shared across processes, so it would force inference over IPC too, at
+    # ~45MB of window+embedding per batch.
+    #
+    # Tk is NOT thread-safe: the worker only ever puts tuples on this queue,
+    # and every widget touch happens in _poll() below, on the main thread.
+    result_queue = queue.Queue()
 
-    try:
-        rec = _NNRecording.from_signal(leads, predict=True, progress_callback=_on_progress,
-                                        noisy_beat_mode=noisy_beat_mode, ensemble_bundle=ensemble_bundle)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        message_label.config(text = f"Inference failed: {e}")
-        return
-    finally:
+    def _on_progress(stage, i, n):
+        result_queue.put(('progress', stage, i, n))     # worker thread
+
+    def _work():
+        try:
+            rec = _NNRecording.from_signal(
+                leads, predict=True, progress_callback=_on_progress,
+                noisy_beat_mode=noisy_beat_mode, ensemble_bundle=ensemble_bundle)
+            result_queue.put(('done', rec))
+        except Exception as e:
+            import traceback
+            result_queue.put(('error', e, traceback.format_exc()))
+
+    def _finish():
         progress_bar.stop()
         progress_bar.grid_remove()
         auto_mark_button['state'] = tk.NORMAL
 
+    def _poll():
+        """Drain the worker's queue on the main thread. Re-arms itself until
+        the worker reports 'done' or 'error'."""
+        try:
+            while True:
+                msg = result_queue.get_nowait()
+                if msg[0] == 'progress':
+                    _, stage, i, n = msg
+                    if stage == 'loading_model':
+                        message_label.config(text = "Loading model")
+                    elif stage == 'loading_encoder':
+                        message_label.config(text = "Loading HuBERT-ECG encoder")
+                    elif stage == 'inference':
+                        if str(progress_bar['mode']) != 'determinate':
+                            progress_bar.stop()
+                            progress_bar['mode'] = 'determinate'
+                        progress_bar['maximum'] = max(n, 1)
+                        progress_bar['value'] = i
+                        message_label.config(text = f"Running neural QRS detection: {i}/{n} beats")
+                elif msg[0] == 'error':
+                    _, e, tb = msg
+                    print(tb)
+                    _finish()
+                    message_label.config(text = f"Inference failed: {e}")
+                    return
+                elif msg[0] == 'done':
+                    _finish()
+                    _apply_results(msg[1])
+                    return
+        except queue.Empty:
+            pass
+        message_label.after(50, _poll)
+
+    threading.Thread(target = _work, daemon = True).start()
+    message_label.after(50, _poll)
+
+
+def _apply_results (rec):
+    """Turn a finished Recording into Period/QRS table rows.
+
+    Split out of automatic_period_marking() when inference moved to a worker
+    thread: this half must run on the Tk main thread, and is reached from
+    _poll() rather than falling through from the call above.
+    """
     # 'force' mode means every beat, including ones flagged noisy (window
     # overlaps a neighbor), should show up in the marking tables -- 'recovery'
     # and 'exclude' both still want noisy beats kept out (see
@@ -884,13 +937,11 @@ def automatic_period_marking ():
 
         # QRS uncertainty: ecg_nn already derives real per-beat onset/offset
         # values and stores them on the beat -- use them instead of the
-        # config constant. v6 is purely parametric: these ARE tau_on/tau_off,
-        # its own learned uncertainty, read straight from the model (no mask
-        # involved). FiLM (v4) has no such parameter, so this falls back to a
-        # mask threshold-crossing width for that model. Falls back further to
-        # the config value only if neither is available (e.g. FiLM's mask
-        # never crossed threshold). Kept genuinely separate (not averaged/
-        # maxed into one number) -- see TABLE_FIELD_CONFIG['qrs'].
+        # config constant. The ensemble is purely parametric: these ARE
+        # tau_on/tau_off, its own learned uncertainty, read straight from the
+        # model (no mask involved). Falls back to the config value only if
+        # they are missing. Kept genuinely separate (not averaged/maxed into
+        # one number) -- see TABLE_FIELD_CONFIG['qrs'].
         if beat.qrs_start_uncert is not None:
             qrs_uncertainty_on = f"{beat.qrs_start_uncert:.2f}"
         else:
@@ -2077,6 +2128,24 @@ def ecg_marker():
     janela.bind('<Key>', key_press)
 
     fig.canvas.mpl_connect('button_press_event', onclick)
+
+    # Pre-warm the NN model in the background, so the first click on
+    # "automatic marking" finds a warm cache instead of paying for a 43MB
+    # bundle load, the HuBERT download/load, and (on a GPU new enough for
+    # inductor) torch.compile -- none of which report progress while they
+    # run. Loading overlaps with the user opening a file and scrolling.
+    #
+    # daemon=True so a half-finished warm-up never keeps the app alive on
+    # exit. Failures are deliberately swallowed to a console note: a warm-up
+    # is an optimization, and if it cannot run, the normal inference path
+    # will build the model itself and report any real error properly.
+    def _prewarm_model():
+        try:
+            _NNRecording.prewarm(ensemble_bundle = ensemble_bundle)
+        except Exception as e:
+            print(f"[ecg_nn] model pre-warm skipped: {type(e).__name__}: {e}")
+
+    threading.Thread(target = _prewarm_model, daemon = True).start()
 
     janela.mainloop()
 
