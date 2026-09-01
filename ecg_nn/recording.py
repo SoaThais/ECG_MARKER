@@ -176,12 +176,15 @@ class Recording:
     # (device, ensemble_bundle) so switching bundles rebuilds correctly.
     _model_cache = {}
 
-    # Beats per inference call. Bigger batches parallelize better on GPU
-    # (more throughput per kernel launch) at the cost of more VRAM; this size
-    # is comfortable on an 8GB card with a 32-64 member ensemble and leaves
-    # headroom for whatever else is using the GPU. Tune down if predict()
-    # ever OOMs, up if profiling shows the GPU still idle between batches.
-    _INFERENCE_BATCH_SIZE = 16
+    # Beats per inference call. Measured on our GTX 1080 (megamodel_loo32,
+    # 32 members): per-beat cost drops from 19.30ms (B=16) to 16.79ms (B=32),
+    # plateauing further out (15.92ms at B=102) -- per-call CPU dispatch
+    # overhead is largely fixed regardless of batch size (this model makes
+    # ~640 tiny conv1d calls per predict()), so bigger batches dilute it over
+    # more beats. 32 is comfortable on an 8GB card with a 32-64 member
+    # ensemble and leaves headroom for whatever else is using the GPU. Tune
+    # down if predict() ever OOMs.
+    _INFERENCE_BATCH_SIZE = 32
 
     @staticmethod
     def _load_qrs_ensemble_class():
@@ -195,6 +198,18 @@ class Recording:
             sys.path.insert(0, _PRODUCTION_DIR)
         from qrs_ensemble import QRSEnsemble
         return QRSEnsemble
+
+    @staticmethod
+    def _load_deferred_sync_class():
+        """Import our own qrs_ensemble_deferred.DeferredSyncQRSEnsemble --
+        see that file's docstring. Same sys.path setup as
+        _load_qrs_ensemble_class since it lives alongside qrs_ensemble.py.
+        """
+        import sys
+        if _PRODUCTION_DIR not in sys.path:
+            sys.path.insert(0, _PRODUCTION_DIR)
+        from qrs_ensemble_deferred import DeferredSyncQRSEnsemble
+        return DeferredSyncQRSEnsemble
 
     @staticmethod
     def _subset_ensemble_to_light(ensemble):
@@ -258,6 +273,14 @@ class Recording:
             head = QRSEnsemble.load(ensemble_path, device=str(device))
             if ensemble_bundle == 'light':
                 head = self._subset_ensemble_to_light(head)
+            # Wrap in our deferred-sync variant (see qrs_ensemble_deferred.py):
+            # identical output (verified exact-match against the original
+            # loop, not just close), only the GPU->CPU sync timing differs --
+            # once at the end instead of once per member. Real, free win
+            # (~1.08x measured), unlike the vmap patch (qrs_ensemble_fast.py,
+            # kept but NOT wired in -- see that file for why).
+            DeferredSyncQRSEnsemble = self._load_deferred_sync_class()
+            head = DeferredSyncQRSEnsemble.from_ensemble(head)
             model_version = 'ensemble'
 
             _notify('loading_encoder')
