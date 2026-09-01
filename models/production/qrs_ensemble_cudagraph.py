@@ -72,12 +72,20 @@ scheduling the SAME work differently. The one thing that still helps is
 doing LESS work: 'light' ensemble mode (4 members instead of 32, see
 ecg_nn.recording) is a genuine ~7.4x for exactly that reason.
 
+Cross-hardware check, RTX 4070 Ti SUPER (Ada Lovelace, MMC workstation
+node114) -- same torch 2.6.0+cu124, batch=32, 32 members: loop=118.5ms,
+this module=110.1ms -- 1.08x. Same ballpark as the GTX 1080's 1.05x, not
+qualitatively different, even though the loop itself is ~4.5x faster on
+this newer/bigger GPU in absolute terms. So this isn't a Pascal-specific
+or "not enough CUDA cores" artifact either -- the compute-bound
+conclusion above holds across hardware generations, not just this one
+aging card.
+
 Given the added complexity (fixed batch size, CUDA-only, padding logic,
-capture-time warmup cost) for a marginal gain over what's already wired
-in via qrs_ensemble_deferred.py, this module is NOT wired into ecg_nn's
-default path -- kept here as a correct, working, thoroughly-verified
-reference in case it's useful on different hardware (a GPU where kernel
-launch overhead is a bigger fraction of per-op cost) or at larger K.
+capture-time warmup cost) for a consistently marginal gain over what's
+already wired in via qrs_ensemble_deferred.py, this module is NOT wired
+into ecg_nn's default path -- kept here as a correct, working,
+thoroughly-verified reference.
 """
 import os
 

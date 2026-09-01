@@ -56,15 +56,21 @@ regresses -- but on our GTX 1080 it also isn't a real win: measured 304ms
 (loop) vs 317ms (this module) per batch of 16, 32 members -- 0.96x, a wash
 within run-to-run noise, not a speedup. Numerics are much tighter than the
 disabled-cudnn attempt too (max diff ~0.006ms vs golden-level ~0.03ms
-before), since both paths now run identical cudnn kernels. Plausible reason
-for the lack of speedup: this Pascal-generation GPU and this small a model
-(331K-336K params) may already be compute-bound rather than
-launch-overhead-bound at K=32, so collapsing the K sequential launches into
-one doesn't remove much. Kept here as a correct, working building block --
-worth re-benchmarking on newer GPU generations or larger K -- but 'light'
-mode (models/production's 4-member subset, see ecg_nn.recording) remains
-the effective speedup today: a genuine ~7.4x from doing less work (4 members
-instead of 32), not from parallelizing the same work differently.
+before), since both paths now run identical cudnn kernels.
+
+Cross-hardware check, RTX 4070 Ti SUPER (Ada Lovelace, MMC workstation
+node114) -- same torch 2.6.0+cu124, batch=32, 32 members: loop=118.5ms,
+this module=227.2ms -- 0.52x, i.e. nearly 2x SLOWER, WORSE than on the
+GTX 1080, not better. So "maybe it helps on a bigger/newer GPU" was tested
+directly and the answer is no: as the underlying loop gets faster on
+better hardware, vmap's own batching-rule dispatch overhead (roughly
+fixed regardless of GPU) becomes a LARGER fraction of the now-smaller
+total time, not a smaller one. This isn't a Pascal-specific or
+small-model-specific artifact -- it's a real cost of this approach.
+
+'light' mode (models/production's 4-member subset, see ecg_nn.recording)
+remains the effective speedup: a genuine ~7.4x from doing less work (4
+members instead of 32), not from parallelizing the same work differently.
 """
 import copy
 import os
