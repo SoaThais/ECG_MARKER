@@ -34,11 +34,16 @@ NOISY_BEAT_MIN_DURATION_MS = 100.0  # was_noisy + short-duration quality check
 FORCE_MODE_LOW_CONFIDENCE_UNCERTAINTY = 40.0  # ms, 'force' mode's flag value
 
 # Production QRS ensemble bundles (../models/production/, ported from daint's
-# logits/production/ -- see that dir's README.md). Both use the same
+# logits/production/ -- see that dir's README.md). All three use the same
 # architecture as our own v6 port (linear/no-HuBERT tau head); only the
 # member list and provenance differ:
 #   '4fold'    -- megamodel_loo32.pt, 32 members (4 leave-one-out folds x 8
 #                 seeds), from a completed run with real held-out validation.
+#   'light'    -- the SAME megamodel_loo32.pt file, subset at load time
+#                 (_LIGHT_ENSEMBLE_SEED, see _run_inference) down to 4
+#                 members, one per fold (seed 0), instead of 8 -- 8x less
+#                 compute per beat, still one vote from every held-out
+#                 patient. No separate file to ship or download.
 #   'complete' -- allseed64.pt, 64 members trained on all patients, no
 #                 holdout -- no honest validation is possible for this one.
 # Picked at runtime via Recording.from_signal(..., ensemble_bundle=...).
@@ -47,8 +52,13 @@ FORCE_MODE_LOW_CONFIDENCE_UNCERTAINTY = 40.0  # ms, 'force' mode's flag value
 # them) -- see _run_inference. Both weight directories live under
 # ../models/ -- see that directory for why (v6_daint/ is now a legacy
 # fallback, production/ is current).
-ENSEMBLE_BUNDLES = ('4fold', 'complete')
-_ENSEMBLE_BUNDLE_FILES = {'4fold': 'megamodel_loo32.pt', 'complete': 'allseed64.pt'}
+ENSEMBLE_BUNDLES = ('4fold', 'light', 'complete')
+_ENSEMBLE_BUNDLE_FILES = {
+    '4fold': 'megamodel_loo32.pt',
+    'light': 'megamodel_loo32.pt',   # same file as '4fold' -- subset after load
+    'complete': 'allseed64.pt',
+}
+_LIGHT_ENSEMBLE_SEED = 0  # which seed represents each fold in 'light' mode
 _PRODUCTION_DIR = os.path.join(os.path.dirname(__file__), '..', 'models', 'production')
 
 
@@ -186,6 +196,24 @@ class Recording:
         from qrs_ensemble import QRSEnsemble
         return QRSEnsemble
 
+    @staticmethod
+    def _subset_ensemble_to_light(ensemble):
+        """'light' mode: keep exactly one member (seed == _LIGHT_ENSEMBLE_SEED)
+        per unique held_out fold, in place, using the loaded QRSEnsemble's own
+        provenance list -- no edits to the vendored qrs_ensemble.py needed,
+        since .predict() only ever iterates self.heads.
+        """
+        keep = [i for i, p in enumerate(ensemble.provenance)
+                if p.get('seed') == _LIGHT_ENSEMBLE_SEED]
+        if not keep:
+            # Provenance didn't have the expected shape (e.g. a bundle built
+            # differently than megamodel_loo32.pt) -- fail safe to the full
+            # ensemble rather than silently predicting on zero members.
+            return ensemble
+        ensemble.heads = [ensemble.heads[i] for i in keep]
+        ensemble.provenance = [ensemble.provenance[i] for i in keep]
+        return ensemble
+
     def _run_inference(self, progress_callback=None):
         """Run mask-head inference and write qrs_duration / qt_interval back
         into each beat.  Skips noisy beats.
@@ -228,6 +256,8 @@ class Recording:
             _notify('loading_model')
             QRSEnsemble = self._load_qrs_ensemble_class()
             head = QRSEnsemble.load(ensemble_path, device=str(device))
+            if ensemble_bundle == 'light':
+                head = self._subset_ensemble_to_light(head)
             model_version = 'ensemble'
 
             _notify('loading_encoder')

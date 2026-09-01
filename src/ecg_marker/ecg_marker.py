@@ -55,6 +55,8 @@ noisy_beat_mode = DEFAULT_NOISY_BEAT_MODE
 ENSEMBLE_BUNDLE_INFO = {
     '4fold':    ("4-fold",
                  "32-member ensemble from 4 leave-one-out folds x 8 seeds."),
+    'light':    ("Light",
+                 "4-member ensemble, one seed per leave-one-out fold -- faster, less averaging."),
     'complete': ("Complete",
                  "64-member ensemble trained on all patients with no holdout."),
 }
@@ -786,7 +788,7 @@ def open_ecg_nn_settings ():
     tk.Label(win, text = "Model", font = ('Arial', 12, 'bold')).pack(anchor = 'w', padx = 12, pady = (16, 4))
 
     bundle_var = tk.StringVar(value = ensemble_bundle)
-    for value in ('4fold', 'complete'):
+    for value in ('4fold', 'light', 'complete'):
         label, desc = ENSEMBLE_BUNDLE_INFO[value]
         tk.Radiobutton(win, text = label, variable = bundle_var, value = value, font = ('Arial', 10)).pack(anchor = 'w', padx = 12, pady = (8, 0))
         tk.Label(win, text = desc, font = ('Arial', 8), fg = 'gray30', justify = 'left').pack(anchor = 'w', padx = 34)
