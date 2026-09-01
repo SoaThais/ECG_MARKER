@@ -33,6 +33,22 @@ NOISY_BEAT_MODES = ('recovery', 'exclude', 'force')
 NOISY_BEAT_MIN_DURATION_MS = 100.0  # was_noisy + short-duration quality check
 FORCE_MODE_LOW_CONFIDENCE_UNCERTAINTY = 40.0  # ms, 'force' mode's flag value
 
+# Production QRS ensemble bundles (../v6_production/, ported from daint's
+# logits/production/ -- see that dir's README.md). Both use the same
+# architecture as our own v6 port (linear/no-HuBERT tau head); only the
+# member list and provenance differ:
+#   '4fold'    -- megamodel_loo32.pt, 32 members (4 leave-one-out folds x 8
+#                 seeds), from a completed run with real held-out validation.
+#   'complete' -- allseed64.pt, 64 members trained on all patients, no
+#                 holdout -- no honest validation is possible for this one.
+# Picked at runtime via Recording.from_signal(..., ensemble_bundle=...).
+# Falls back to the single mid-training v6_daint checkpoint, then FiLM, if
+# the production bundle files aren't present (e.g. a fresh clone without
+# them) -- see _run_inference.
+ENSEMBLE_BUNDLES = ('4fold', 'complete')
+_ENSEMBLE_BUNDLE_FILES = {'4fold': 'megamodel_loo32.pt', 'complete': 'allseed64.pt'}
+_PRODUCTION_DIR = os.path.join(os.path.dirname(__file__), '..', 'v6_production')
+
 
 def _detect_spikes_from_stimulus(vd_d, min_distance_ms=50):
     """Detect beat positions from the VD d stimulus channel.
@@ -65,7 +81,8 @@ class Recording:
 
     @classmethod
     def from_signal(cls, leads, annotations=None, source=None, predict=False,
-                     progress_callback=None, noisy_beat_mode='recovery'):
+                     progress_callback=None, noisy_beat_mode='recovery',
+                     ensemble_bundle='4fold'):
         """Build a Recording from a leads dict already in memory.
 
         Parameters
@@ -84,6 +101,11 @@ class Recording:
                                               bar, or a Tk widget updater.
         noisy_beat_mode : str                 one of NOISY_BEAT_MODES -- see
                                               module docstring above.
+        ensemble_bundle : str                 one of ENSEMBLE_BUNDLES -- which
+                                              production QRS ensemble to use,
+                                              if the bundle files are present
+                                              (see ENSEMBLE_BUNDLES docstring
+                                              above). Ignored otherwise.
 
         Returns
         -------
@@ -92,6 +114,9 @@ class Recording:
         if noisy_beat_mode not in NOISY_BEAT_MODES:
             raise ValueError(f"noisy_beat_mode must be one of {NOISY_BEAT_MODES}, "
                               f"got {noisy_beat_mode!r}")
+        if ensemble_bundle not in ENSEMBLE_BUNDLES:
+            raise ValueError(f"ensemble_bundle must be one of {ENSEMBLE_BUNDLES}, "
+                              f"got {ensemble_bundle!r}")
 
         annotations = annotations or {}
         matrix, lead_names = leads_matrix(leads)
@@ -119,6 +144,7 @@ class Recording:
 
         rec = cls(beats, lead_names, matrix)
         rec.noisy_beat_mode = noisy_beat_mode
+        rec.ensemble_bundle = ensemble_bundle
 
         if predict:
             rec._run_inference(progress_callback=progress_callback)
@@ -134,16 +160,35 @@ class Recording:
     # CUDA init) and don't depend on the recording, so cache them at class
     # level across calls/instances instead of rebuilding on every
     # from_signal(..., predict=True). Cleared automatically if a different
-    # process starts (module-level state, not persisted).
+    # process starts (module-level state, not persisted). Keyed by
+    # (device, ensemble_bundle) so switching bundles rebuilds correctly.
     _model_cache = {}
+
+    @staticmethod
+    def _load_qrs_ensemble_class():
+        """Import qrs_ensemble.QRSEnsemble from ../v6_production/, which is a
+        bare-import module pair (qrs_ensemble.py does `from qrs_model import
+        MaskHeadV6`, assuming both sit in the same directory) -- not part of
+        this package, so it needs its own directory on sys.path first.
+        """
+        import sys
+        if _PRODUCTION_DIR not in sys.path:
+            sys.path.insert(0, _PRODUCTION_DIR)
+        from qrs_ensemble import QRSEnsemble
+        return QRSEnsemble
 
     def _run_inference(self, progress_callback=None):
         """Run mask-head inference and write qrs_duration / qt_interval back
         into each beat.  Skips noisy beats.
 
-        Model selection: v6 (MaskHeadV6, attention-pooling) if its ported
-        checkpoint is present alongside the package, else the original FiLM
-        MaskHead. Both consume the same (window, context) pair from the same
+        Model selection, highest priority first:
+          1. Production ensemble (../v6_production/, self.ensemble_bundle) --
+             a median across many MaskHeadV6 members, from a completed run.
+             See v6_production/README.md.
+          2. Single mid-training v6 checkpoint (../v6_daint/), if the
+             production bundle isn't present.
+          3. Original FiLM MaskHead, as a last resort.
+        All three consume the same (window, context) pair from the same
         HuBERT encoder, so only the head and its output unpacking differ.
 
         progress_callback, if given, is called as progress_callback(stage, i, n)
@@ -160,10 +205,24 @@ class Recording:
                 progress_callback(stage, i, n)
 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        cache_key = str(device)
+        ensemble_bundle = getattr(self, 'ensemble_bundle', '4fold')
+        ensemble_path = os.path.join(_PRODUCTION_DIR, _ENSEMBLE_BUNDLE_FILES[ensemble_bundle])
+        use_ensemble = os.path.exists(ensemble_path)
+        cache_key = (str(device), ensemble_bundle if use_ensemble else None)
 
         if cache_key in self._model_cache:
             head, model_version, encoder = self._model_cache[cache_key]
+        elif use_ensemble:
+            _notify('loading_model')
+            QRSEnsemble = self._load_qrs_ensemble_class()
+            head = QRSEnsemble.load(ensemble_path, device=str(device))
+            model_version = 'ensemble'
+
+            _notify('loading_encoder')
+            encoder, _ = build_encoder(device=device, freeze=True)
+            encoder.eval()
+
+            self._model_cache[cache_key] = (head, model_version, encoder)
         else:
             _notify('loading_model')
             if os.path.exists(self._V6_CHECKPOINT):
@@ -224,7 +283,19 @@ class Recording:
 
                 win_start_ms = float(beat.spike_idx - beat.window_pre)
 
-                if model_version == 'v6':
+                if model_version == 'ensemble':
+                    # QRSEnsemble.predict() does its own median-across-members
+                    # combination (median(onset), median(offset), duration =
+                    # their difference -- NOT the median of per-member
+                    # durations, see v6_production/README.md) and returns
+                    # tau_on/tau_off as genuine model outputs, same contract
+                    # as our own v6 port's coefs_b.
+                    out = head.predict(window_2ch, emb)
+                    beat.qrs_start        = win_start_ms + float(out['onset'][0])
+                    beat.qrs_duration     = max(0.0, float(out['duration'][0]))
+                    beat.qrs_start_uncert = float(out['tau_on'][0])
+                    beat.qrs_end_uncert   = float(out['tau_off'][0])
+                elif model_version == 'v6':
                     # v6 is purely parametric -- t_on/tau_on/t_off/tau_off ARE
                     # the prediction. The mask it also returns is a rendering
                     # of those coefs (_coefs_to_mask), not an independent

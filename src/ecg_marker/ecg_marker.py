@@ -40,21 +40,26 @@ DEFAULT_UNCERTAINTY  = 15.0
 # Changeable at runtime via the "ecg_nn ⚙" toolbar button.
 NOISY_BEAT_MODE_INFO = {
     'recovery': ("Recovery (same as training)",
-                 "Try to rescue overlapping beats with a shifted/truncated window.\n"
-                 "Discards any that still fail recovery, or whose predicted QRS\n"
-                 "duration comes out under 100ms."),
+                 "Rescues overlapping beats with a shifted, truncated window."),
     'exclude':  ("Exclude",
-                 "Don't attempt recovery. Skip inference entirely for beats whose\n"
-                 "window overlaps a neighbor -- they get no QRS mark at all."),
+                 "Skips inference for any beat whose window overlaps a neighbor."),
     'force':    ("Force",
-                 "Don't attempt recovery. Run inference on every beat with its\n"
-                 "plain, standard, R-peak-centered window regardless of overlap,\n"
-                 "and include all of them in the marking tables. Ones whose\n"
-                 "predicted QRS duration comes out under 100ms stay visible but\n"
-                 "get their uncertainty forced to 40ms -- flagged, not hidden."),
+                 "Runs inference on every beat, using its plain R-peak-centered window regardless of overlap."),
 }
 DEFAULT_NOISY_BEAT_MODE = 'recovery'
 noisy_beat_mode = DEFAULT_NOISY_BEAT_MODE
+
+# Which production QRS ensemble bundle to use (see ecg_nn.recording.ENSEMBLE_BUNDLES
+# for the full contract). Only takes effect if the bundle files are present under
+# v6_production/ -- otherwise ecg_nn falls back to the single mid-training checkpoint.
+ENSEMBLE_BUNDLE_INFO = {
+    '4fold':    ("4-fold",
+                 "32-member ensemble from 4 leave-one-out folds x 8 seeds."),
+    'complete': ("Complete",
+                 "64-member ensemble trained on all patients with no holdout."),
+}
+DEFAULT_ENSEMBLE_BUNDLE = '4fold'
+ensemble_bundle = DEFAULT_ENSEMBLE_BUNDLE
 
 # Configuração de cada tabela de marcação: em qual posição da tupla estão os campos
 # 'initial' (tempo inicial), 'final' (tempo final), 'duration' (duração/intervalo, recalculada
@@ -758,12 +763,14 @@ def onclick (event):
 
 def open_ecg_nn_settings ():
 
-    # Janela de configuração do ecg_nn: escolhe o modo de tratamento de batimentos cujo
+    # Janela de configuração do ecg_nn: escolhe (1) o modo de tratamento de batimentos cujo
     # janela sobrepõe a de um vizinho (ver ecg_nn.recording.NOISY_BEAT_MODES e
-    # NOISY_BEAT_MODE_INFO). O valor escolhido fica em `noisy_beat_mode` (global) e é lido
-    # por automatic_period_marking() a cada execução.
+    # NOISY_BEAT_MODE_INFO) e (2) qual bundle do ensemble de produção usar (ver
+    # ecg_nn.recording.ENSEMBLE_BUNDLES e ENSEMBLE_BUNDLE_INFO). Os valores escolhidos ficam
+    # em `noisy_beat_mode` / `ensemble_bundle` (globais) e são lidos por
+    # automatic_period_marking() a cada execução.
 
-    global noisy_beat_mode
+    global noisy_beat_mode, ensemble_bundle
 
     win = tk.Toplevel(janela)
     win.title("ecg_nn Settings")
@@ -776,10 +783,19 @@ def open_ecg_nn_settings ():
         tk.Radiobutton(win, text = label, variable = mode_var, value = value, font = ('Arial', 10)).pack(anchor = 'w', padx = 12, pady = (8, 0))
         tk.Label(win, text = desc, font = ('Arial', 8), fg = 'gray30', justify = 'left').pack(anchor = 'w', padx = 34)
 
+    tk.Label(win, text = "Model", font = ('Arial', 12, 'bold')).pack(anchor = 'w', padx = 12, pady = (16, 4))
+
+    bundle_var = tk.StringVar(value = ensemble_bundle)
+    for value in ('4fold', 'complete'):
+        label, desc = ENSEMBLE_BUNDLE_INFO[value]
+        tk.Radiobutton(win, text = label, variable = bundle_var, value = value, font = ('Arial', 10)).pack(anchor = 'w', padx = 12, pady = (8, 0))
+        tk.Label(win, text = desc, font = ('Arial', 8), fg = 'gray30', justify = 'left').pack(anchor = 'w', padx = 34)
+
     def apply ():
-        global noisy_beat_mode
+        global noisy_beat_mode, ensemble_bundle
         noisy_beat_mode = mode_var.get()
-        message_label.config(text = f"ecg_nn noisy-beat mode: {noisy_beat_mode}")
+        ensemble_bundle = bundle_var.get()
+        message_label.config(text = f"Noisy-beat mode: {noisy_beat_mode}, model: {ensemble_bundle}")
         win.destroy()
 
     tk.Button(win, text = "Apply", command = apply).pack(pady = 14)
@@ -809,7 +825,7 @@ def automatic_period_marking ():
     # be happening yet) would kick off a second, overlapping inference pass.
     auto_mark_button['state'] = tk.DISABLED
 
-    message_label.config(text = "Loading ecg_nn model...")
+    message_label.config(text = "Loading model")
     message_label.update_idletasks()
 
     leads = {name: np.array(data['values']) for name, data in electrodes.items()}
@@ -822,26 +838,26 @@ def automatic_period_marking ():
 
     def _on_progress(stage, i, n):
         if stage == 'loading_model':
-            message_label.config(text = "Loading ecg_nn model...")
+            message_label.config(text = "Loading model")
         elif stage == 'loading_encoder':
-            message_label.config(text = "Loading HuBERT-ECG encoder...")
+            message_label.config(text = "Loading HuBERT-ECG encoder")
         elif stage == 'inference':
             if str(progress_bar['mode']) != 'determinate':
                 progress_bar.stop()
                 progress_bar['mode'] = 'determinate'
             progress_bar['maximum'] = max(n, 1)
             progress_bar['value'] = i
-            message_label.config(text = f"Running neural QRS detection (ecg_nn)... {i}/{n} beats")
+            message_label.config(text = f"Running neural QRS detection: {i}/{n} beats")
         message_label.update_idletasks()
         progress_bar.update_idletasks()
 
     try:
         rec = _NNRecording.from_signal(leads, predict=True, progress_callback=_on_progress,
-                                        noisy_beat_mode=noisy_beat_mode)
+                                        noisy_beat_mode=noisy_beat_mode, ensemble_bundle=ensemble_bundle)
     except Exception as e:
         import traceback
         traceback.print_exc()
-        message_label.config(text = f"ecg_nn inference failed: {e}")
+        message_label.config(text = f"Inference failed: {e}")
         return
     finally:
         progress_bar.stop()
@@ -918,7 +934,7 @@ def automatic_period_marking ():
     for q in janela.qrs:
         qrs_table.insert("", tk.END, values = q)
 
-    message_label.config(text = f"Automatic Markings Completed ({n_marked} beats, ecg_nn).")
+    message_label.config(text = f"Automatic Markings Completed ({n_marked} beats).")
     message_label.update_idletasks()
 
 def key_press (event):
