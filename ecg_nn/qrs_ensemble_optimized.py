@@ -115,11 +115,21 @@ class OptimizedQRSEnsemble:
     using the original afterwards; load a fresh one if you need fp32.
     """
 
+    #: Minimum CUDA compute capability Triton (inductor's GPU backend) supports.
+    #: Below this, torch.compile is skipped outright -- a GTX 1080 is 6.1.
+    _MIN_TRITON_CC = (7, 0)
+
     def __init__(self, deferred, compiled_predict, fp16, compiled):
         self._deferred = deferred
         self._predict = compiled_predict
         self.fp16 = fp16
         self.compiled = compiled
+        # torch.compile is LAZY: the backend does not run until the first
+        # forward call, so a backend that cannot support this GPU raises
+        # there, not at construction. Guard the first call and fall back
+        # permanently if it does. After one successful call, stop catching --
+        # a later exception is a real error and must surface.
+        self._compile_unverified = compiled
         self.device = deferred.device
         self.provenance = deferred.provenance
         self.manifest = deferred.manifest
@@ -145,21 +155,51 @@ class OptimizedQRSEnsemble:
         deferred = DeferredSyncQRSEnsemble.from_ensemble(ensemble)
         predict = deferred.predict
         compiled = False
-        if compile and on_cuda and hasattr(torch, "compile"):
+        if compile and on_cuda and hasattr(torch, "compile") and cls._triton_capable():
             try:
                 predict = torch.compile(deferred.predict, mode="max-autotune")
                 compiled = True
             except Exception:
                 # A compile failure must never cost correctness -- fall back
                 # to the eager deferred path, which is still the 1.12x fp16
-                # win on its own.
+                # win on its own. (This catches construction-time failures;
+                # the far more likely first-call failure is handled in
+                # predict() -- torch.compile is lazy.)
                 predict = deferred.predict
         return cls(deferred, predict, fp16, compiled)
+
+    @classmethod
+    def _triton_capable(cls):
+        """True when this GPU is new enough for inductor's Triton backend.
+
+        Checked up front because the alternative is discovering it as an
+        exception midway through the first batch of a real recording. Pascal
+        (GTX 1080, CC 6.1) is below the cutoff; Turing and later are above.
+        """
+        try:
+            return torch.cuda.get_device_capability() >= cls._MIN_TRITON_CC
+        except Exception:
+            return False
 
     def __len__(self):
         return len(self._deferred)
 
     def predict(self, window, emb, routing_alpha=1.0, return_members=False):
+        if self._compile_unverified:
+            try:
+                out = self._predict(window, emb, routing_alpha=routing_alpha,
+                                    return_members=return_members)
+            except Exception:
+                # First call, so this is the compile backend failing (it runs
+                # lazily). Drop to eager for the rest of this object's life
+                # and retry -- correctness must not depend on inductor.
+                self._predict = self._deferred.predict
+                self.compiled = False
+                self._compile_unverified = False
+                return self._deferred.predict(window, emb, routing_alpha=routing_alpha,
+                                              return_members=return_members)
+            self._compile_unverified = False
+            return out
         return self._predict(window, emb, routing_alpha=routing_alpha,
                              return_members=return_members)
 
@@ -196,12 +236,11 @@ def run_golden_optimized(bundle_path, golden_path, atol=0.5, **kw):
 def main():
     """Self-test: replay the shipped golden fixtures through this path.
 
-    Requires the bundles, which live in models/production/ (they are not
-    packaged with the code -- 145MB). Skips cleanly when they are absent or
-    when there is no GPU, since on CPU this module is by construction just
-    DeferredSyncQRSEnsemble.
+    Requires the bundles in weights/. Skips cleanly when they are absent
+    or when there is no GPU, since on CPU this module is by construction
+    just DeferredSyncQRSEnsemble.
     """
-    bundle_dir = os.path.normpath(os.path.join(_HERE, "..", "..", "models", "production"))
+    bundle_dir = os.path.join(_HERE, "weights")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     found = False
     for name in ("megamodel_loo32", "allseed64"):

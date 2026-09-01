@@ -33,7 +33,7 @@ NOISY_BEAT_MODES = ('recovery', 'exclude', 'force')
 NOISY_BEAT_MIN_DURATION_MS = 100.0  # was_noisy + short-duration quality check
 FORCE_MODE_LOW_CONFIDENCE_UNCERTAINTY = 40.0  # ms, 'force' mode's flag value
 
-# Production QRS ensemble bundles (../models/production/, ported from daint's
+# Production QRS ensemble bundles (weights/, ported from daint's
 # logits/production/ -- see that dir's README.md). All three use the same
 # architecture as our own v6 port (linear/no-HuBERT tau head); only the
 # member list and provenance differ:
@@ -47,11 +47,10 @@ FORCE_MODE_LOW_CONFIDENCE_UNCERTAINTY = 40.0  # ms, 'force' mode's flag value
 #   'complete' -- allseed64.pt, 64 members trained on all patients, no
 #                 holdout -- no honest validation is possible for this one.
 # Picked at runtime via Recording.from_signal(..., ensemble_bundle=...).
-# Falls back to the single mid-training v6_daint checkpoint, then FiLM, if
-# the production bundle files aren't present (e.g. a fresh clone without
-# them) -- see _run_inference. Both weight directories live under
-# ../models/ -- see that directory for why (v6_daint/ is now a legacy
-# fallback, production/ is current).
+# There is no fallback model: if the bundle is missing, _run_inference raises.
+# The old FiLM (v4) and mid-training v6 heads used to fill that role and were
+# removed -- they predicted from different, unvalidated weights, so silently
+# degrading to them produced numbers no golden fixture covers.
 ENSEMBLE_BUNDLES = ('4fold', 'light', 'complete')
 _ENSEMBLE_BUNDLE_FILES = {
     '4fold': 'megamodel_loo32.pt',
@@ -59,10 +58,7 @@ _ENSEMBLE_BUNDLE_FILES = {
     'complete': 'allseed64.pt',
 }
 _LIGHT_ENSEMBLE_SEED = 0  # which seed represents each fold in 'light' mode
-# Weights only. The production CODE (vendored model + loader + converter +
-# the optimized inference path) is the ecg_nn.production subpackage; the .pt
-# bundles stay out here because they are 145MB.
-_PRODUCTION_DIR = os.path.join(os.path.dirname(__file__), '..', 'models', 'production')
+_WEIGHTS_DIR = os.path.join(os.path.dirname(__file__), 'weights')
 
 
 def _detect_spikes_from_stimulus(vd_d, min_distance_ms=50):
@@ -168,9 +164,6 @@ class Recording:
 
     # ── inference ────────────────────────────────────────────────────────────
 
-    _V6_CHECKPOINT = os.path.join(
-        os.path.dirname(__file__), '..', 'models', 'v6_daint', 'model', 'pre_s2_ep1000.pt')
-
     # Model + encoder are expensive to build (HuBERT load, checkpoint read,
     # CUDA init) and don't depend on the recording, so cache them at class
     # level across calls/instances instead of rebuilding on every
@@ -193,12 +186,13 @@ class Recording:
 
     @staticmethod
     def _load_production():
-        """Import the production subpackage (vendored model + loader + the
-        optimized inference path). Imported lazily so that `import ecg_nn`
-        stays cheap and so a torch-less environment can still load this
-        module for the non-inference helpers.
+        """Import the vendored loader and the optimized inference path.
+        Lazy so that `import ecg_nn` stays cheap and a torch-less
+        environment can still load this module for the non-inference
+        helpers.
         """
-        from .production import QRSEnsemble, OptimizedQRSEnsemble
+        from .qrs_ensemble import QRSEnsemble
+        from .qrs_ensemble_optimized import OptimizedQRSEnsemble
         return QRSEnsemble, OptimizedQRSEnsemble
 
     @staticmethod
@@ -223,15 +217,11 @@ class Recording:
         """Run mask-head inference and write qrs_duration / qt_interval back
         into each beat.  Skips noisy beats.
 
-        Model selection, highest priority first:
-          1. Production ensemble (../models/production/, self.ensemble_bundle)
-             -- a median across many MaskHeadV6 members, from a completed run.
-             See models/production/README.md.
-          2. Single mid-training v6 checkpoint (../models/v6_daint/), if the
-             production bundle isn't present.
-          3. Original FiLM MaskHead, as a last resort.
-        All three consume the same (window, context) pair from the same
-        HuBERT encoder, so only the head and its output unpacking differ.
+Uses the production ensemble in weights/ (self.ensemble_bundle) -- a
+        median across many MaskHeadV6 members from a completed run, run
+        through the optimized path (see qrs_ensemble_optimized.py and
+        README.md). It is the only model; a missing bundle raises rather
+        than falling back.
 
         progress_callback, if given, is called as progress_callback(stage, i, n)
         where stage is 'loading_model', 'loading_encoder', or 'inference'
@@ -241,9 +231,8 @@ class Recording:
         not one at a time).
         """
         import torch
-        from .model import build_model, build_model_v6, build_encoder
+        from .encoder import build_encoder
         from .dataset import preprocess_hubert
-        from .inference import mask_to_interval
 
         def _notify(stage, i=0, n=0):
             if progress_callback is not None:
@@ -251,7 +240,7 @@ class Recording:
 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         ensemble_bundle = getattr(self, 'ensemble_bundle', '4fold')
-        ensemble_path = os.path.join(_PRODUCTION_DIR, _ENSEMBLE_BUNDLE_FILES[ensemble_bundle])
+        ensemble_path = os.path.join(_WEIGHTS_DIR, _ENSEMBLE_BUNDLE_FILES[ensemble_bundle])
         use_ensemble = os.path.exists(ensemble_path)
         cache_key = (str(device), ensemble_bundle if use_ensemble else None)
 
@@ -280,27 +269,12 @@ class Recording:
 
             self._model_cache[cache_key] = (head, model_version, encoder)
         else:
-            _notify('loading_model')
-            if os.path.exists(self._V6_CHECKPOINT):
-                head, _ = build_model_v6(checkpoint_path=self._V6_CHECKPOINT, device=device)
-                model_version = 'v6'
-            else:
-                weights_path = os.path.join(os.path.dirname(__file__), 'weights', 'film_head.pt')
-                if not os.path.exists(weights_path):
-                    raise FileNotFoundError(
-                        f"No trained weights at {weights_path} and no v6 checkpoint at "
-                        f"{self._V6_CHECKPOINT}. Train with train_film.py then re-run export.sh."
-                    )
-                head, _ = build_model(device=device)
-                head.load_state_dict(torch.load(weights_path, map_location=device))
-                model_version = 'film'
-            head.eval()
-
-            _notify('loading_encoder')
-            encoder, _ = build_encoder(device=device, freeze=True)
-            encoder.eval()
-
-            self._model_cache[cache_key] = (head, model_version, encoder)
+            raise FileNotFoundError(
+                f"No QRS ensemble bundle at {ensemble_path}. ecg_nn ships exactly "
+                f"one model -- the production ensemble in weights/ (see README.md); "
+                f"the old FiLM and mid-training v6 fallbacks were removed because "
+                f"they predicted from different, unvalidated weights."
+            )
 
         mode = getattr(self, 'noisy_beat_mode', 'recovery')
         if mode == 'exclude':
@@ -357,51 +331,19 @@ class Recording:
                 win_start_ms = np.array(
                     [float(b.spike_idx - b.window_pre) for b in batch], dtype=np.float64)
 
-                if model_version == 'ensemble':
-                    # QRSEnsemble.predict() does its own median-across-members
-                    # combination (median(onset), median(offset), duration =
-                    # their difference -- NOT the median of per-member
-                    # durations, see models/production/README.md) and returns
-                    # tau_on/tau_off as genuine model outputs, same contract
-                    # as our own v6 port's coefs_b. Already batch-native.
-                    out = head.predict(window_2ch, emb)
-                    onset, duration = out['onset'], out['duration']
-                    tau_on, tau_off = out['tau_on'], out['tau_off']
-                    for j, beat in enumerate(batch):
-                        beat.qrs_start        = win_start_ms[j] + float(onset[j])
-                        beat.qrs_duration     = max(0.0, float(duration[j]))
-                        beat.qrs_start_uncert = float(tau_on[j])
-                        beat.qrs_end_uncert   = float(tau_off[j])
-                elif model_version == 'v6':
-                    # v6 is purely parametric -- t_on/tau_on/t_off/tau_off ARE
-                    # the prediction. The mask it also returns is a rendering
-                    # of those coefs (_coefs_to_mask), not an independent
-                    # estimate, so read coefs_b directly instead of running a
-                    # mask threshold-crossing heuristic on a derived mask.
-                    coefs_b = head(window_2ch, emb)[2]            # (B, 4)
-                    for j, beat in enumerate(batch):
-                        t_on, tau_on, t_off, tau_off = coefs_b[j].tolist()
-                        beat.qrs_start        = win_start_ms[j] + t_on
-                        beat.qrs_duration     = max(0.0, t_off - t_on)
-                        beat.qrs_start_uncert = tau_on
-                        beat.qrs_end_uncert   = tau_off
-                else:
-                    # FiLM MaskHead (v4) has no parametric coefs -- the mask
-                    # over the window IS the prediction, so derive start/end
-                    # from where it crosses threshold. mask_to_interval() is
-                    # per-beat (numpy, not batched), so still looped here.
-                    _, mask, durations, _, _ = head(window_2ch, emb)
-                    for j, beat in enumerate(batch):
-                        mask_np = mask[j, 0].cpu().numpy()
-                        rel_start, start_uncert, rel_end, end_uncert = mask_to_interval(mask_np)
-                        if rel_start is not None:
-                            beat.qrs_start        = win_start_ms[j] + rel_start
-                            beat.qrs_start_uncert = start_uncert
-                            beat.qrs_end_uncert   = end_uncert
-                            beat.qrs_duration     = (rel_end - rel_start if rel_end is not None
-                                                      else float(durations[j, 0].item()))
-                        else:
-                            beat.qrs_duration = float(durations[j, 0].item())
+                # QRSEnsemble.predict() does its own median-across-members
+                # combination (median(onset), median(offset), duration =
+                # their difference -- NOT the median of per-member durations,
+                # see README.md) and returns tau_on/tau_off as genuine model
+                # outputs. Already batch-native.
+                out = head.predict(window_2ch, emb)
+                onset, duration = out['onset'], out['duration']
+                tau_on, tau_off = out['tau_on'], out['tau_off']
+                for j, beat in enumerate(batch):
+                    beat.qrs_start        = win_start_ms[j] + float(onset[j])
+                    beat.qrs_duration     = max(0.0, float(duration[j]))
+                    beat.qrs_start_uncert = float(tau_on[j])
+                    beat.qrs_end_uncert   = float(tau_off[j])
 
                 # Quality check for beats that started out overlap-flagged
                 # (recovered window for 'recovery', plain window anyway for
@@ -423,7 +365,7 @@ class Recording:
                     elif is_suspect and mode == 'force':
                         # Keep it visible (that's the point of 'force'), but
                         # flag low confidence instead of trusting tau_on/
-                        # tau_off (or the FiLM mask-derived uncertainty) as-is.
+                        # tau_off as-is.
                         beat.qrs_start_uncert = FORCE_MODE_LOW_CONFIDENCE_UNCERTAINTY
                         beat.qrs_end_uncert   = FORCE_MODE_LOW_CONFIDENCE_UNCERTAINTY
 
@@ -550,9 +492,8 @@ def _synthetic_leads(n=15000, bcl=800, seed=0):
 
 def main():
     """Self-test: synthesize a pacing signal, run from_signal(..., predict=True)
-    end to end (spike detection -> windows -> HuBERT encoding -> mask-head
-    inference), and sanity-check the result. Model version (v6 vs FiLM) is
-    whatever Recording._run_inference auto-selects (see its docstring).
+    end to end (spike detection -> windows -> HuBERT encoding -> ensemble
+    inference), and sanity-check the result. Requires a bundle in weights/.
     """
     leads, spike_positions = _synthetic_leads()
 
@@ -564,7 +505,7 @@ def main():
 
     assert len(rec) > 0, "no beats detected"
     # NOTE: rec.annotated requires qt_interval too, which _run_inference does
-    # not populate (FiLM or v6) -- QT prediction isn't wired up yet. Check the
+    # not populate -- QT prediction isn't wired up yet. Check the
     # QRS prediction directly instead.
     assert n_qrs > 0, "no beats got model predictions"
     for b in rec.beats[:3]:

@@ -7,20 +7,27 @@ final; see Caveats for what is still outstanding.
 
 | file | what |
 |---|---|
-| `qrs_model.py` | vendored `MaskHeadV6`. Self-contained; **do not edit**. |
+| `qrs_model.py` | vendored `MaskHeadV6`. **Do not edit** — byte-identical to the training repo. |
 | `qrs_ensemble.py` | vendored loader + reference `predict()`. **Do not edit**. |
 | `qrs_ensemble_deferred.py` | one GPU→CPU sync instead of K (1.08x). Base of the below. |
-| `qrs_ensemble_optimized.py` | **what the app runs**: deferred + `torch.compile` + fp16 (2.09x). |
-| `package_ensemble.py` | converter: run directories → a `.pt` bundle (build-time only). |
+| `qrs_ensemble_optimized.py` | **what the app runs**: deferred + `torch.compile` + fp16. |
+| `package_ensemble.py` | converter: run directories → a `.pt` bundle. |
 | `make_golden.py` / `regen_golden.py` | record / re-record the golden fixtures. |
+| `beat.py` | beat detection + window extraction. |
+| `dataset.py` | `preprocess_hubert` — window → encoder input. |
+| `encoder.py` | the HuBERT-ECG encoder (fetched from the Hub, not bundled). |
+| `recording.py` | the pipeline the app calls: `Recording.from_signal(..., predict=True)`. |
+| `weights/` | the `.pt` bundles and `golden_*.npz` fixtures (~145MB). |
 
-The two vendored files ship exactly as pulled from daint, so a re-sync is a
-straight copy; everything added on top sits beside them rather than patching
-them. They import each other by bare name, which is why `__init__.py` puts this
-directory on `sys.path` first.
+The layout is **flat on purpose**: the two vendored files import each other by
+bare name, so `__init__.py` puts this directory on `sys.path` and a re-sync
+from the training repo stays a straight file copy.
 
-**Weights are not here.** The `.pt` bundles and `golden_*.npz` fixtures (~145MB)
-stay in `models/production/`, exposed as `BUNDLE_DIR`.
+There is **one model**. The FiLM (v4) head, `MaskHeadV1`, the `PTHead` baseline,
+the mid-training `v6_daint` checkpoint and the duplicate in-package `MaskHeadV6`
+were all removed — they predicted from different, unvalidated weights, and a
+silent fallback to them produced numbers no golden fixture covers. A missing
+bundle now raises.
 
 Both `.pt` files load through the same `.py`: their members are architecturally
 identical (linear / no-HuBERT τ head, 336,341 tensor entries, window 550). Only
@@ -170,6 +177,11 @@ submodule the golden fixture tolerates. Measured on an RTX 4070 Ti SUPER
 Worst golden deviation for that config: **0.130 ms** (offset), against the
 0.5 ms tolerance. Roughly 3.8 s → 1.8 s of head inference per ~1000-beat
 recording.
+
+`torch.compile` needs inductor's Triton backend, which requires **CUDA compute
+capability >= 7.0** (Turing+). On older cards — the local GTX 1080 is 6.1 — it is
+skipped automatically and the path runs deferred + fp16 only (~1.12x). Check
+`.compiled` / `.fp16` on the returned object for what actually happened.
 
 **fp16 stops at the backbones**, which stay fp32 — casting either one moves
 onset by ~23 ms, 46× outside tolerance, and casting only its last layer is just
