@@ -294,7 +294,7 @@ def build_encoder(device=None, **kwargs):
 
 # =========================================================
 # MaskHeadV6  (attention-pooling architecture, ported from
-# logits/src/v6/model_stage2.py on daint — see ../v6_daint/)
+# logits/src/v6/model_stage2.py on daint — see ../models/v6_daint/)
 # =========================================================
 
 class LeadFeatureCompressor(nn.Module):
@@ -686,7 +686,7 @@ def build_model_v6(checkpoint_path=None, device=None, **kwargs):
 
 def _default_v6_checkpoint():
     import os
-    return os.path.join(os.path.dirname(__file__), '..', 'v6_daint', 'model', 'pre_s2_ep1000.pt')
+    return os.path.join(os.path.dirname(__file__), '..', 'models', 'v6_daint', 'model', 'pre_s2_ep1000.pt')
 
 
 def main():

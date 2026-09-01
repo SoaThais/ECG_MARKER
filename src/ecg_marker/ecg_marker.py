@@ -51,7 +51,7 @@ noisy_beat_mode = DEFAULT_NOISY_BEAT_MODE
 
 # Which production QRS ensemble bundle to use (see ecg_nn.recording.ENSEMBLE_BUNDLES
 # for the full contract). Only takes effect if the bundle files are present under
-# v6_production/ -- otherwise ecg_nn falls back to the single mid-training checkpoint.
+# models/production/ -- otherwise ecg_nn falls back to the single mid-training checkpoint.
 ENSEMBLE_BUNDLE_INFO = {
     '4fold':    ("4-fold",
                  "32-member ensemble from 4 leave-one-out folds x 8 seeds."),

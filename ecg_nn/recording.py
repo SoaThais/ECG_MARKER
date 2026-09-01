@@ -33,7 +33,7 @@ NOISY_BEAT_MODES = ('recovery', 'exclude', 'force')
 NOISY_BEAT_MIN_DURATION_MS = 100.0  # was_noisy + short-duration quality check
 FORCE_MODE_LOW_CONFIDENCE_UNCERTAINTY = 40.0  # ms, 'force' mode's flag value
 
-# Production QRS ensemble bundles (../v6_production/, ported from daint's
+# Production QRS ensemble bundles (../models/production/, ported from daint's
 # logits/production/ -- see that dir's README.md). Both use the same
 # architecture as our own v6 port (linear/no-HuBERT tau head); only the
 # member list and provenance differ:
@@ -44,10 +44,12 @@ FORCE_MODE_LOW_CONFIDENCE_UNCERTAINTY = 40.0  # ms, 'force' mode's flag value
 # Picked at runtime via Recording.from_signal(..., ensemble_bundle=...).
 # Falls back to the single mid-training v6_daint checkpoint, then FiLM, if
 # the production bundle files aren't present (e.g. a fresh clone without
-# them) -- see _run_inference.
+# them) -- see _run_inference. Both weight directories live under
+# ../models/ -- see that directory for why (v6_daint/ is now a legacy
+# fallback, production/ is current).
 ENSEMBLE_BUNDLES = ('4fold', 'complete')
 _ENSEMBLE_BUNDLE_FILES = {'4fold': 'megamodel_loo32.pt', 'complete': 'allseed64.pt'}
-_PRODUCTION_DIR = os.path.join(os.path.dirname(__file__), '..', 'v6_production')
+_PRODUCTION_DIR = os.path.join(os.path.dirname(__file__), '..', 'models', 'production')
 
 
 def _detect_spikes_from_stimulus(vd_d, min_distance_ms=50):
@@ -154,7 +156,7 @@ class Recording:
     # ── inference ────────────────────────────────────────────────────────────
 
     _V6_CHECKPOINT = os.path.join(
-        os.path.dirname(__file__), '..', 'v6_daint', 'model', 'pre_s2_ep1000.pt')
+        os.path.dirname(__file__), '..', 'models', 'v6_daint', 'model', 'pre_s2_ep1000.pt')
 
     # Model + encoder are expensive to build (HuBERT load, checkpoint read,
     # CUDA init) and don't depend on the recording, so cache them at class
@@ -166,10 +168,10 @@ class Recording:
 
     @staticmethod
     def _load_qrs_ensemble_class():
-        """Import qrs_ensemble.QRSEnsemble from ../v6_production/, which is a
-        bare-import module pair (qrs_ensemble.py does `from qrs_model import
-        MaskHeadV6`, assuming both sit in the same directory) -- not part of
-        this package, so it needs its own directory on sys.path first.
+        """Import qrs_ensemble.QRSEnsemble from ../models/production/, which
+        is a bare-import module pair (qrs_ensemble.py does `from qrs_model
+        import MaskHeadV6`, assuming both sit in the same directory) -- not
+        part of this package, so it needs its own directory on sys.path first.
         """
         import sys
         if _PRODUCTION_DIR not in sys.path:
@@ -182,10 +184,10 @@ class Recording:
         into each beat.  Skips noisy beats.
 
         Model selection, highest priority first:
-          1. Production ensemble (../v6_production/, self.ensemble_bundle) --
-             a median across many MaskHeadV6 members, from a completed run.
-             See v6_production/README.md.
-          2. Single mid-training v6 checkpoint (../v6_daint/), if the
+          1. Production ensemble (../models/production/, self.ensemble_bundle)
+             -- a median across many MaskHeadV6 members, from a completed run.
+             See models/production/README.md.
+          2. Single mid-training v6 checkpoint (../models/v6_daint/), if the
              production bundle isn't present.
           3. Original FiLM MaskHead, as a last resort.
         All three consume the same (window, context) pair from the same
@@ -287,7 +289,7 @@ class Recording:
                     # QRSEnsemble.predict() does its own median-across-members
                     # combination (median(onset), median(offset), duration =
                     # their difference -- NOT the median of per-member
-                    # durations, see v6_production/README.md) and returns
+                    # durations, see models/production/README.md) and returns
                     # tau_on/tau_off as genuine model outputs, same contract
                     # as our own v6 port's coefs_b.
                     out = head.predict(window_2ch, emb)
