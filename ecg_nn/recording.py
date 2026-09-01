@@ -166,6 +166,13 @@ class Recording:
     # (device, ensemble_bundle) so switching bundles rebuilds correctly.
     _model_cache = {}
 
+    # Beats per inference call. Bigger batches parallelize better on GPU
+    # (more throughput per kernel launch) at the cost of more VRAM; this size
+    # is comfortable on an 8GB card with a 32-64 member ensemble and leaves
+    # headroom for whatever else is using the GPU. Tune down if predict()
+    # ever OOMs, up if profiling shows the GPU still idle between batches.
+    _INFERENCE_BATCH_SIZE = 16
+
     @staticmethod
     def _load_qrs_ensemble_class():
         """Import qrs_ensemble.QRSEnsemble from ../models/production/, which
@@ -195,7 +202,10 @@ class Recording:
 
         progress_callback, if given, is called as progress_callback(stage, i, n)
         where stage is 'loading_model', 'loading_encoder', or 'inference'
-        (i/n are 0/0 for the loading stages, 1-based beat count for inference).
+        (i/n are 0/0 for the loading stages; for inference, i is the
+        cumulative beat count processed so far -- inference runs in batches
+        of _INFERENCE_BATCH_SIZE, so i jumps by up to that many at once,
+        not one at a time).
         """
         import torch
         from .model import build_model, build_model_v6, build_encoder
@@ -265,25 +275,43 @@ class Recording:
         if not targets:
             return
 
-        from tqdm import tqdm
-
         n_targets = len(targets)
         _notify('inference', 0, n_targets)
-        with torch.no_grad():
-            for i, beat in enumerate(tqdm(targets, desc=f"ecg_nn inference ({model_version})", unit="beat"), start=1):
-                _notify('inference', i, n_targets)
-                x = torch.from_numpy(
-                    preprocess_hubert(beat.context_window)
-                ).unsqueeze(0).to(device)
-                emb = encoder.encode(x)                          # (1, 12, t, 768)
 
-                dw  = torch.from_numpy(beat.decision_window).unsqueeze(0).to(device)
-                win = torch.from_numpy(beat.window.astype('float32')).unsqueeze(0).to(device)
+        # Fixed-shape batches (same window size, same batch size for every
+        # call but the last) run many times over -- once per progress step,
+        # 32/64x more per call again inside the ensemble's own member loop --
+        # so cudnn's autotuner (picks the fastest conv algorithm after a short
+        # warmup, keyed on input shape) actually pays for itself here, unlike
+        # a model that sees a different shape every call.
+        if device.type == 'cuda':
+            torch.backends.cudnn.benchmark = True
+
+        processed = 0
+        with torch.no_grad():
+            for batch_start in range(0, n_targets, self._INFERENCE_BATCH_SIZE):
+                batch = targets[batch_start:batch_start + self._INFERENCE_BATCH_SIZE]
+
+                # HuBERT encoding batched too -- it's a transformer forward
+                # pass per lead, i.e. the expensive half of each beat, not
+                # just the mask head. encoder.encode() already reshapes
+                # (N, L, T) -> (N*L, T) internally, so this was always
+                # batch-ready; only the caller wasn't using it.
+                x = torch.from_numpy(
+                    np.stack([preprocess_hubert(b.context_window) for b in batch])
+                ).to(device)
+                emb = encoder.encode(x)                          # (B, 12, t, 768)
+
+                dw  = torch.from_numpy(np.stack([b.decision_window for b in batch])).to(device)
+                win = torch.from_numpy(
+                    np.stack([b.window.astype('float32') for b in batch])
+                ).to(device)
 
                 n_leads = dw.shape[1]                            # 12, excludes VD d
-                window_2ch = torch.stack([dw, win[:, :n_leads, :]], dim=2)  # (1, L, 2, W)
+                window_2ch = torch.stack([dw, win[:, :n_leads, :]], dim=2)  # (B, L, 2, W)
 
-                win_start_ms = float(beat.spike_idx - beat.window_pre)
+                win_start_ms = np.array(
+                    [float(b.spike_idx - b.window_pre) for b in batch], dtype=np.float64)
 
                 if model_version == 'ensemble':
                     # QRSEnsemble.predict() does its own median-across-members
@@ -291,39 +319,45 @@ class Recording:
                     # their difference -- NOT the median of per-member
                     # durations, see models/production/README.md) and returns
                     # tau_on/tau_off as genuine model outputs, same contract
-                    # as our own v6 port's coefs_b.
+                    # as our own v6 port's coefs_b. Already batch-native.
                     out = head.predict(window_2ch, emb)
-                    beat.qrs_start        = win_start_ms + float(out['onset'][0])
-                    beat.qrs_duration     = max(0.0, float(out['duration'][0]))
-                    beat.qrs_start_uncert = float(out['tau_on'][0])
-                    beat.qrs_end_uncert   = float(out['tau_off'][0])
+                    onset, duration = out['onset'], out['duration']
+                    tau_on, tau_off = out['tau_on'], out['tau_off']
+                    for j, beat in enumerate(batch):
+                        beat.qrs_start        = win_start_ms[j] + float(onset[j])
+                        beat.qrs_duration     = max(0.0, float(duration[j]))
+                        beat.qrs_start_uncert = float(tau_on[j])
+                        beat.qrs_end_uncert   = float(tau_off[j])
                 elif model_version == 'v6':
                     # v6 is purely parametric -- t_on/tau_on/t_off/tau_off ARE
                     # the prediction. The mask it also returns is a rendering
                     # of those coefs (_coefs_to_mask), not an independent
                     # estimate, so read coefs_b directly instead of running a
                     # mask threshold-crossing heuristic on a derived mask.
-                    coefs_b = head(window_2ch, emb)[2]
-                    t_on, tau_on, t_off, tau_off = coefs_b[0].tolist()
-                    beat.qrs_start        = win_start_ms + t_on
-                    beat.qrs_duration     = max(0.0, t_off - t_on)
-                    beat.qrs_start_uncert = tau_on
-                    beat.qrs_end_uncert   = tau_off
+                    coefs_b = head(window_2ch, emb)[2]            # (B, 4)
+                    for j, beat in enumerate(batch):
+                        t_on, tau_on, t_off, tau_off = coefs_b[j].tolist()
+                        beat.qrs_start        = win_start_ms[j] + t_on
+                        beat.qrs_duration     = max(0.0, t_off - t_on)
+                        beat.qrs_start_uncert = tau_on
+                        beat.qrs_end_uncert   = tau_off
                 else:
                     # FiLM MaskHead (v4) has no parametric coefs -- the mask
                     # over the window IS the prediction, so derive start/end
-                    # from where it crosses threshold.
+                    # from where it crosses threshold. mask_to_interval() is
+                    # per-beat (numpy, not batched), so still looped here.
                     _, mask, durations, _, _ = head(window_2ch, emb)
-                    mask_np = mask[0, 0].cpu().numpy()
-                    rel_start, start_uncert, rel_end, end_uncert = mask_to_interval(mask_np)
-                    if rel_start is not None:
-                        beat.qrs_start        = win_start_ms + rel_start
-                        beat.qrs_start_uncert = start_uncert
-                        beat.qrs_end_uncert   = end_uncert
-                        beat.qrs_duration     = (rel_end - rel_start if rel_end is not None
-                                                  else float(durations[0, 0].item()))
-                    else:
-                        beat.qrs_duration = float(durations[0, 0].item())
+                    for j, beat in enumerate(batch):
+                        mask_np = mask[j, 0].cpu().numpy()
+                        rel_start, start_uncert, rel_end, end_uncert = mask_to_interval(mask_np)
+                        if rel_start is not None:
+                            beat.qrs_start        = win_start_ms[j] + rel_start
+                            beat.qrs_start_uncert = start_uncert
+                            beat.qrs_end_uncert   = end_uncert
+                            beat.qrs_duration     = (rel_end - rel_start if rel_end is not None
+                                                      else float(durations[j, 0].item()))
+                        else:
+                            beat.qrs_duration = float(durations[j, 0].item())
 
                 # Quality check for beats that started out overlap-flagged
                 # (recovered window for 'recovery', plain window anyway for
@@ -336,17 +370,21 @@ class Recording:
                 # here would mask that instead of surfacing it. 'exclude' has
                 # nothing to check either way: it never predicts on noisy
                 # beats in the first place.
-                is_suspect = (beat.was_noisy and beat.qrs_duration is not None
-                              and beat.qrs_duration < NOISY_BEAT_MIN_DURATION_MS)
-                if is_suspect and mode == 'recovery':
-                    # Discard: gate it out of the marking output entirely.
-                    beat.noisy = True
-                elif is_suspect and mode == 'force':
-                    # Keep it visible (that's the point of 'force'), but flag
-                    # low confidence instead of trusting tau_on/tau_off (or
-                    # the FiLM mask-derived uncertainty) as-is.
-                    beat.qrs_start_uncert = FORCE_MODE_LOW_CONFIDENCE_UNCERTAINTY
-                    beat.qrs_end_uncert   = FORCE_MODE_LOW_CONFIDENCE_UNCERTAINTY
+                for beat in batch:
+                    is_suspect = (beat.was_noisy and beat.qrs_duration is not None
+                                  and beat.qrs_duration < NOISY_BEAT_MIN_DURATION_MS)
+                    if is_suspect and mode == 'recovery':
+                        # Discard: gate it out of the marking output entirely.
+                        beat.noisy = True
+                    elif is_suspect and mode == 'force':
+                        # Keep it visible (that's the point of 'force'), but
+                        # flag low confidence instead of trusting tau_on/
+                        # tau_off (or the FiLM mask-derived uncertainty) as-is.
+                        beat.qrs_start_uncert = FORCE_MODE_LOW_CONFIDENCE_UNCERTAINTY
+                        beat.qrs_end_uncert   = FORCE_MODE_LOW_CONFIDENCE_UNCERTAINTY
+
+                processed += len(batch)
+                _notify('inference', processed, n_targets)
 
     # ── collections ──────────────────────────────────────────────────────────
 
