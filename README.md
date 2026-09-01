@@ -127,6 +127,36 @@ python3 ./src/ecg_marker/ecg_marker.py  -i ./input/ -f 0
 python3 ./src/ecg_marker/ecg_marker.py  -i ./output/ecg_data.txt -r 0 
 ```
 
+## Neural automatic marking (ecg_nn)
+
+Automatic QRS marking runs on a neural model (`ecg_nn/`) instead of `neurokit2`.
+Click **Automatic Marking** in the GUI, or the **ecg_nn ⚙** button (next to the
+plot toolbar) to change how it behaves:
+
+- **Noisy beat handling** -- what to do with a beat whose window overlaps a
+  neighbor's: *Recovery* (rescue with a shifted/truncated window, same as
+  training), *Exclude* (skip it), or *Force* (predict on it anyway, flag
+  low-confidence results instead of hiding them).
+- **Model** -- which production ensemble to use: *4-fold* (32 members, 4
+  leave-one-out folds x 8 seeds, has real held-out validation) or *Complete*
+  (64 members trained on all patients, no holdout possible).
+
+### Model weights (`models/`)
+
+```
+models/
+├── v6_daint/     legacy fallback: a single mid-training checkpoint
+└── production/   current: the production QRS ensemble bundle
+```
+
+`ecg_nn` picks the best one available at runtime: the production ensemble in
+`models/production/` if present, else the single checkpoint in
+`models/v6_daint/`, else the original FiLM head. See
+[`models/production/README.md`](models/production/README.md) for the
+ensemble's full input/output contract, golden-test usage, and caveats
+(notably: TF32 must stay disabled on CUDA, and `encoder_sha256` is not yet
+filled in, so HuBERT-encoder compatibility isn't verified automatically).
+
 ## Note
 
 If a folder is used as input, name the files in the directory in alphabetical order.
