@@ -213,6 +213,82 @@ class Recording:
         ensemble.provenance = [ensemble.provenance[i] for i in keep]
         return ensemble
 
+    @classmethod
+    def _get_model(cls, device, ensemble_bundle, ensemble_path, notify=None):
+        """Build (or fetch from cache) the ensemble + encoder for one config.
+
+        Split out of _run_inference so that prewarm() can drive exactly the
+        same code path off the UI thread -- there must not be two ways to
+        build the model, or the cache key and the warmed object could drift
+        apart and the warm-up would silently buy nothing.
+
+        Everything expensive happens here: a 43MB torch.load, K MaskHeadV6
+        constructions, the HuBERT download/load, and (on a GPU new enough for
+        it) torch.compile's first-call compilation. None of it emits progress
+        between steps, which is why a caller on a GUI thread freezes.
+        """
+        def _notify(stage, i=0, n=0):
+            if notify is not None:
+                notify(stage, i, n)
+
+        use_ensemble = os.path.exists(ensemble_path)
+        cache_key = (str(device), ensemble_bundle if use_ensemble else None)
+        if cache_key in cls._model_cache:
+            return cls._model_cache[cache_key]
+        if not use_ensemble:
+            raise FileNotFoundError(
+                f"No QRS ensemble bundle at {ensemble_path}. ecg_nn ships exactly "
+                f"one model -- the production ensemble in weights/ (see README.md); "
+                f"the old FiLM and mid-training v6 fallbacks were removed because "
+                f"they predicted from different, unvalidated weights."
+            )
+
+        from .encoder import build_encoder
+
+        _notify('loading_model')
+        QRSEnsemble, OptimizedQRSEnsemble = cls._load_production()
+        head = QRSEnsemble.load(ensemble_path, device=str(device))
+        if ensemble_bundle == 'light':
+            head = cls._subset_ensemble_to_light(head)
+        # Wrap in the optimized path: deferred sync + torch.compile + fp16 on
+        # every submodule that passes the golden fixture (the backbones stay
+        # fp32 -- see qrs_ensemble_optimized.py). 2.09x over the plain loop on
+        # an RTX 4070 Ti SUPER, worst-case golden deviation 0.13 ms against a
+        # 0.5 ms tolerance. Degrades to the deferred path on CPU or if compile
+        # fails, never to wrong numbers.
+        head = OptimizedQRSEnsemble.from_ensemble(head)
+        model_version = 'ensemble'
+
+        _notify('loading_encoder')
+        encoder, _ = build_encoder(device=device, freeze=True)
+        encoder.eval()
+
+        cls._model_cache[cache_key] = (head, model_version, encoder)
+        return head, model_version, encoder
+
+    @classmethod
+    def prewarm(cls, ensemble_bundle='4fold', device=None, progress_callback=None):
+        """Load the model into the class-level cache ahead of first use.
+
+        Intended to be called from a background thread at application start,
+        so the first from_signal(predict=True) finds a warm cache instead of
+        paying for it while the user waits. Safe to call more than once and
+        safe to call concurrently with inference: a second call with a warm
+        cache is a dict lookup.
+
+        Exceptions propagate to the caller -- a warm-up that fails should be
+        reported by whoever asked for it, not swallowed here, and inference
+        will simply rebuild (and raise properly) on its own path.
+
+        Returns True if the model is loaded when this returns.
+        """
+        import torch
+        if device is None:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        path = os.path.join(_WEIGHTS_DIR, _ENSEMBLE_BUNDLE_FILES[ensemble_bundle])
+        cls._get_model(device, ensemble_bundle, path, progress_callback)
+        return True
+
     def _run_inference(self, progress_callback=None):
         """Run mask-head inference and write qrs_duration / qt_interval back
         into each beat.  Skips noisy beats.
@@ -241,40 +317,8 @@ Uses the production ensemble in weights/ (self.ensemble_bundle) -- a
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         ensemble_bundle = getattr(self, 'ensemble_bundle', '4fold')
         ensemble_path = os.path.join(_WEIGHTS_DIR, _ENSEMBLE_BUNDLE_FILES[ensemble_bundle])
-        use_ensemble = os.path.exists(ensemble_path)
-        cache_key = (str(device), ensemble_bundle if use_ensemble else None)
-
-        if cache_key in self._model_cache:
-            head, model_version, encoder = self._model_cache[cache_key]
-        elif use_ensemble:
-            _notify('loading_model')
-            QRSEnsemble, OptimizedQRSEnsemble = self._load_production()
-            head = QRSEnsemble.load(ensemble_path, device=str(device))
-            if ensemble_bundle == 'light':
-                head = self._subset_ensemble_to_light(head)
-            # Wrap in the optimized path: deferred sync + torch.compile +
-            # fp16 on every submodule that passes the golden fixture (the
-            # backbones stay fp32 -- see qrs_ensemble_optimized.py). 2.09x
-            # over the plain loop on an RTX 4070 Ti SUPER, worst-case golden
-            # deviation 0.13 ms against a 0.5 ms tolerance. Degrades to the
-            # deferred path on CPU or if compile fails, never to wrong
-            # numbers. The first call pays ~1-2 min of compilation, which is
-            # why the result is held in _model_cache for the session.
-            head = OptimizedQRSEnsemble.from_ensemble(head)
-            model_version = 'ensemble'
-
-            _notify('loading_encoder')
-            encoder, _ = build_encoder(device=device, freeze=True)
-            encoder.eval()
-
-            self._model_cache[cache_key] = (head, model_version, encoder)
-        else:
-            raise FileNotFoundError(
-                f"No QRS ensemble bundle at {ensemble_path}. ecg_nn ships exactly "
-                f"one model -- the production ensemble in weights/ (see README.md); "
-                f"the old FiLM and mid-training v6 fallbacks were removed because "
-                f"they predicted from different, unvalidated weights."
-            )
+        head, model_version, encoder = self._get_model(
+            device, ensemble_bundle, ensemble_path, _notify)
 
         mode = getattr(self, 'noisy_beat_mode', 'recovery')
         if mode == 'exclude':
