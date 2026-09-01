@@ -147,13 +147,10 @@ plot toolbar) to change how it behaves:
 
 ```
 models/
-├── v6_daint/     legacy fallback: a single mid-training checkpoint
-└── production/   current: the production QRS ensemble bundle
+└── production/   the production QRS ensemble bundle
 ```
 
-`ecg_nn` picks the best one available at runtime: the production ensemble in
-`models/production/` if present, else the single checkpoint in
-`models/v6_daint/`, else the original FiLM head. See
+`ecg_nn` uses the production ensemble in `models/production/`. See
 [`models/production/README.md`](models/production/README.md) for the
 ensemble's full input/output contract, golden-test usage, and caveats
 (notably: TF32 must stay disabled on CUDA, and `encoder_sha256` is not yet
