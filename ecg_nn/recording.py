@@ -59,6 +59,9 @@ _ENSEMBLE_BUNDLE_FILES = {
     'complete': 'allseed64.pt',
 }
 _LIGHT_ENSEMBLE_SEED = 0  # which seed represents each fold in 'light' mode
+# Weights only. The production CODE (vendored model + loader + converter +
+# the optimized inference path) is the ecg_nn.production subpackage; the .pt
+# bundles stay out here because they are 145MB.
 _PRODUCTION_DIR = os.path.join(os.path.dirname(__file__), '..', 'models', 'production')
 
 
@@ -176,40 +179,27 @@ class Recording:
     # (device, ensemble_bundle) so switching bundles rebuilds correctly.
     _model_cache = {}
 
-    # Beats per inference call. Measured on our GTX 1080 (megamodel_loo32,
-    # 32 members): per-beat cost drops from 19.30ms (B=16) to 16.79ms (B=32),
-    # plateauing further out (15.92ms at B=102) -- per-call CPU dispatch
-    # overhead is largely fixed regardless of batch size (this model makes
-    # ~640 tiny conv1d calls per predict()), so bigger batches dilute it over
-    # more beats. 32 is comfortable on an 8GB card with a 32-64 member
-    # ensemble and leaves headroom for whatever else is using the GPU. Tune
-    # down if predict() ever OOMs.
+    # Beats per inference call. 32 is the sweet spot and re-measured on an
+    # RTX 4070 Ti SUPER (megamodel_loo32, 32 members, deferred path):
+    # 4.13 ms/beat at B=16, 3.79 at B=32, then WORSE further out -- 4.51 at
+    # B=64 and 4.95 at B=128, because the per-layer activations scale with B
+    # and the path is memory-bound, so past 32 the extra footprint costs more
+    # than the diluted per-call overhead saves. (The older note here claimed a
+    # monotonic improvement out to B=102 on the GTX 1080; that was measured
+    # before the sync and fusion fixes, when fixed CPU dispatch overhead still
+    # dominated.) Also comfortable on an 8GB card. Tune down if predict()
+    # ever OOMs.
     _INFERENCE_BATCH_SIZE = 32
 
     @staticmethod
-    def _load_qrs_ensemble_class():
-        """Import qrs_ensemble.QRSEnsemble from ../models/production/, which
-        is a bare-import module pair (qrs_ensemble.py does `from qrs_model
-        import MaskHeadV6`, assuming both sit in the same directory) -- not
-        part of this package, so it needs its own directory on sys.path first.
+    def _load_production():
+        """Import the production subpackage (vendored model + loader + the
+        optimized inference path). Imported lazily so that `import ecg_nn`
+        stays cheap and so a torch-less environment can still load this
+        module for the non-inference helpers.
         """
-        import sys
-        if _PRODUCTION_DIR not in sys.path:
-            sys.path.insert(0, _PRODUCTION_DIR)
-        from qrs_ensemble import QRSEnsemble
-        return QRSEnsemble
-
-    @staticmethod
-    def _load_deferred_sync_class():
-        """Import our own qrs_ensemble_deferred.DeferredSyncQRSEnsemble --
-        see that file's docstring. Same sys.path setup as
-        _load_qrs_ensemble_class since it lives alongside qrs_ensemble.py.
-        """
-        import sys
-        if _PRODUCTION_DIR not in sys.path:
-            sys.path.insert(0, _PRODUCTION_DIR)
-        from qrs_ensemble_deferred import DeferredSyncQRSEnsemble
-        return DeferredSyncQRSEnsemble
+        from .production import QRSEnsemble, OptimizedQRSEnsemble
+        return QRSEnsemble, OptimizedQRSEnsemble
 
     @staticmethod
     def _subset_ensemble_to_light(ensemble):
@@ -269,18 +259,19 @@ class Recording:
             head, model_version, encoder = self._model_cache[cache_key]
         elif use_ensemble:
             _notify('loading_model')
-            QRSEnsemble = self._load_qrs_ensemble_class()
+            QRSEnsemble, OptimizedQRSEnsemble = self._load_production()
             head = QRSEnsemble.load(ensemble_path, device=str(device))
             if ensemble_bundle == 'light':
                 head = self._subset_ensemble_to_light(head)
-            # Wrap in our deferred-sync variant (see qrs_ensemble_deferred.py):
-            # identical output (verified exact-match against the original
-            # loop, not just close), only the GPU->CPU sync timing differs --
-            # once at the end instead of once per member. Real, free win
-            # (~1.08x measured), unlike the vmap patch (qrs_ensemble_fast.py,
-            # kept but NOT wired in -- see that file for why).
-            DeferredSyncQRSEnsemble = self._load_deferred_sync_class()
-            head = DeferredSyncQRSEnsemble.from_ensemble(head)
+            # Wrap in the optimized path: deferred sync + torch.compile +
+            # fp16 on every submodule that passes the golden fixture (the
+            # backbones stay fp32 -- see qrs_ensemble_optimized.py). 2.09x
+            # over the plain loop on an RTX 4070 Ti SUPER, worst-case golden
+            # deviation 0.13 ms against a 0.5 ms tolerance. Degrades to the
+            # deferred path on CPU or if compile fails, never to wrong
+            # numbers. The first call pays ~1-2 min of compilation, which is
+            # why the result is held in _model_cache for the session.
+            head = OptimizedQRSEnsemble.from_ensemble(head)
             model_version = 'ensemble'
 
             _notify('loading_encoder')
