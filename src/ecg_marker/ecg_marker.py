@@ -2078,7 +2078,7 @@ def ecg_marker():
     # not yet known, and a click landing in that window would have run on the
     # CPU of a GPU machine -- so the fix is to make the button unavailable
     # rather than to guess a default.
-    auto_mark_button = tk.Button(frame_right, text='Automatic Marking',
+    auto_mark_button = tk.Button(frame_right, text='Automatic Marking (loading model...)',
                                   command = automatic_period_marking, state = tk.DISABLED)
     auto_mark_button.grid(row = 0, column = 2, columnspan = 4, padx = 20, pady = 10, ipadx = 20)
 
@@ -2274,30 +2274,36 @@ def ecg_marker():
     # exit. Failures are deliberately swallowed to a console note: a warm-up
     # is an optimization, and if it cannot run, the normal inference path
     # will build the model itself and report any real error properly.
-    def _prewarm_ready(note):
+    def _prewarm_ready():
         # Main thread (reached via after()): Tk is not thread-safe.
+        #
+        # Deliberately does NOT write to message_label. The status bar belongs
+        # to whatever the user is doing -- marking, file operations, key hints
+        # -- and a model notice arriving there ~20s after launch would stomp on
+        # it for something the user never asked about. The button's own label
+        # carries the state instead, right where the click would go, and the
+        # device actually used is reported at the END of a run (see
+        # _apply_results), which is when it is evidence rather than noise.
         auto_mark_button['state'] = tk.NORMAL
-        message_label.config(text = note)
+        auto_mark_button['text'] = 'Automatic Marking'
 
     def _prewarm_model():
         # Probe first: this both fixes the device default (GPU when present,
         # CPU otherwise) and warms the cache under the key the run will use.
         _probe_cuda()
-        where = 'GPU' if inference_device == 'cuda' else 'CPU'
         try:
             _NNRecording.prewarm(ensemble_bundle = ensemble_bundle,
                                   device = inference_device)
-            note = f"Model ready on {where} ({_cuda_name or 'cpu'}), bundle: {ensemble_bundle}."
+            print(f"[ecg_nn] model ready on {inference_device}"
+                  f" ({_cuda_name or 'cpu'}), bundle: {ensemble_bundle}")
         except Exception as e:
             # A failed warm-up is not fatal -- the normal inference path
-            # rebuilds and reports real errors properly -- so the button is
-            # still enabled, just with an honest warning that the first run
-            # will pay the load.
+            # rebuilds and reports real errors properly -- so the button still
+            # becomes available; the first run just pays the load. Reported on
+            # the console, not in the UI, for the same reason as above.
             print(f"[ecg_nn] model pre-warm failed: {type(e).__name__}: {e}")
-            note = f"Model not pre-loaded ({type(e).__name__}); first run will be slower."
-        janela.after(0, lambda: _prewarm_ready(note))
+        janela.after(0, _prewarm_ready)
 
-    message_label.config(text = "Loading model...")
     threading.Thread(target = _prewarm_model, daemon = True).start()
 
     janela.mainloop()
