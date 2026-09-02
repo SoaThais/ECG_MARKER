@@ -941,11 +941,10 @@ def automatic_period_marking ():
 
     def _work():
         try:
-            # Make sure the device default reflects the machine before using
-            # it: if the user clicks before the startup pre-warm has finished
-            # probing, inference_device is still its 'cpu' placeholder and the
-            # run would quietly go to the CPU on a GPU machine. Cached, so this
-            # is free on every call after the first.
+            # Backstop only: the button is disabled until the pre-warm has
+            # probed, so this should already be cached and free. Kept because
+            # the cost is a dict check and the failure it prevents -- running
+            # on the CPU of a GPU machine -- is silent.
             _probe_cuda()
             rec = _NNRecording.from_signal(
                 leads, predict=True, progress_callback=_on_progress,
@@ -2074,7 +2073,13 @@ def ecg_marker():
     frame_right.rowconfigure(10, weight = 3)
     frame_right.rowconfigure(11, weight = 1)
 
-    auto_mark_button = tk.Button(frame_right, text='Automatic Marking', command = automatic_period_marking)
+    # Starts DISABLED and is enabled by the pre-warm thread once torch has been
+    # probed and the model is cached. Until that probe finishes the device is
+    # not yet known, and a click landing in that window would have run on the
+    # CPU of a GPU machine -- so the fix is to make the button unavailable
+    # rather than to guess a default.
+    auto_mark_button = tk.Button(frame_right, text='Automatic Marking',
+                                  command = automatic_period_marking, state = tk.DISABLED)
     auto_mark_button.grid(row = 0, column = 2, columnspan = 4, padx = 20, pady = 10, ipadx = 20)
 
     freq_name = tk.Label(frame_right, text = "Period", font = ('Arial', 16))
@@ -2269,16 +2274,30 @@ def ecg_marker():
     # exit. Failures are deliberately swallowed to a console note: a warm-up
     # is an optimization, and if it cannot run, the normal inference path
     # will build the model itself and report any real error properly.
+    def _prewarm_ready(note):
+        # Main thread (reached via after()): Tk is not thread-safe.
+        auto_mark_button['state'] = tk.NORMAL
+        message_label.config(text = note)
+
     def _prewarm_model():
+        # Probe first: this both fixes the device default (GPU when present,
+        # CPU otherwise) and warms the cache under the key the run will use.
+        _probe_cuda()
+        where = 'GPU' if inference_device == 'cuda' else 'CPU'
         try:
-            # Probe first: this both fixes the default (GPU when present, CPU
-            # otherwise) and warms the cache under the key the run will use.
-            _probe_cuda()
             _NNRecording.prewarm(ensemble_bundle = ensemble_bundle,
                                   device = inference_device)
+            note = f"Model ready on {where} ({_cuda_name or 'cpu'}), bundle: {ensemble_bundle}."
         except Exception as e:
-            print(f"[ecg_nn] model pre-warm skipped: {type(e).__name__}: {e}")
+            # A failed warm-up is not fatal -- the normal inference path
+            # rebuilds and reports real errors properly -- so the button is
+            # still enabled, just with an honest warning that the first run
+            # will pay the load.
+            print(f"[ecg_nn] model pre-warm failed: {type(e).__name__}: {e}")
+            note = f"Model not pre-loaded ({type(e).__name__}); first run will be slower."
+        janela.after(0, lambda: _prewarm_ready(note))
 
+    message_label.config(text = "Loading model...")
     threading.Thread(target = _prewarm_model, daemon = True).start()
 
     janela.mainloop()
