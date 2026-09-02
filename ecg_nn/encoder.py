@@ -15,14 +15,13 @@ ships and the only one the weights are validated against.
 """
 import torch
 import torch.nn as nn
-
+from transformers.models.auto import AutoModel  # <-- Bypass root lazy loading
 
 class HuBERTECGRegressor(nn.Module):
     """Frozen HuBERT-ECG encoder.  Call .encode(x) to get per-lead embeddings."""
 
     def __init__(self, repo_id='Edoardo-BS/hubert-ecg-base', freeze=True, **kwargs):
         super().__init__()
-        from transformers import AutoModel
 
         self.encoder = AutoModel.from_pretrained(repo_id, trust_remote_code=True)
 

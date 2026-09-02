@@ -1472,15 +1472,29 @@ def save_data ():
 
     plt.figure()
 
+    # with open(output_dir + apd_file, 'w') as f:
+    #     f.write("Period, Estimated APD\n")
+    #     if (len(janela.qt) == len(janela.qrs)):
+    #         tam = len(janela.qt)
+    #     for indice in range(tam):
+    #         if (janela.qrs[indice][2] == janela.qt[indice][2]):
+    #             period = janela.qt[indice][2]
+    #             f.write(f"{float(period)}, {float(janela.qt[indice][3]) - float(janela.qrs[indice][3])}\n")
+    #             plt.plot(float(period), float(janela.qt[indice][3]) - float(janela.qrs[indice][3]), 'bo')
+
+    # plt.xlabel("Period")
+    # plt.ylabel("Estimated APD")
+    # plt.savefig("APD.png")
+
     with open(output_dir + apd_file, 'w') as f:
         f.write("Period, Estimated APD\n")
-        if (len(janela.qt) == len(janela.qrs)):
+        if janela.qt and len(janela.qt) == len(janela.qrs):
             tam = len(janela.qt)
-        for indice in range(tam):
-            if (janela.qrs[indice][2] == janela.qt[indice][2]):
-                period = janela.qt[indice][2]
-                f.write(f"{float(period)}, {float(janela.qt[indice][3]) - float(janela.qrs[indice][3])}\n")
-                plt.plot(float(period), float(janela.qt[indice][3]) - float(janela.qrs[indice][3]), 'bo')
+            for indice in range(tam):
+                if (janela.qrs[indice][2] == janela.qt[indice][2]):
+                    period = janela.qt[indice][2]
+                    f.write(f"{float(period)}, {float(janela.qt[indice][3]) - float(janela.qrs[indice][3])}\n")
+                    plt.plot(float(period), float(janela.qt[indice][3]) - float(janela.qrs[indice][3]), 'bo')
 
     plt.xlabel("Period")
     plt.ylabel("Estimated APD")
@@ -1952,15 +1966,15 @@ def ecg_marker():
 
     freq_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency', 'uncertainty'), show = 'headings', height = 5)
     freq_table.grid(row = 2, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
-    freq_table.heading('initial_x', text = 'Initial X')
-    freq_table.heading('final_x', text = 'Final X')
-    freq_table.heading('frequency', text = 'Period')
+    freq_table.heading('initial_x', text = 'Initial X', command = make_sort_handler('freq', 'initial'))
+    freq_table.heading('final_x', text = 'Final X', command = make_sort_handler('freq', 'final'))
+    freq_table.heading('frequency', text = 'Period', command = make_sort_handler('freq', 'duration'))
     freq_table.heading('uncertainty', text = 'Uncertainty (ms)', command = make_sort_handler('freq', 'uncertainty'))
 
-    freq_table.column('initial_x', width = 120, anchor = 'center')
-    freq_table.column('final_x', width = 120, anchor = 'center')
-    freq_table.column('frequency', width = 120, anchor = 'center')
-    freq_table.column('uncertainty', width = 120, anchor = 'center')
+    freq_table.column('initial_x', width = 150, anchor = 'center')
+    freq_table.column('final_x', width = 150, anchor = 'center')
+    freq_table.column('frequency', width = 150, anchor = 'center')
+    freq_table.column('uncertainty', width = 150, anchor = 'center')
 
     scrollbar_vertical_freq = tk.Scrollbar(frame_right, orient='vertical', command=freq_table.yview)
     scrollbar_vertical_freq.grid(row=2, column=4, sticky='ns')
@@ -1989,12 +2003,12 @@ def ecg_marker():
         displaycolumns = ('initial_x', 'final_x', 'frequency', 'qrs', 'uncertainty', 'uncertainty_end'),
         show = 'headings', height = 5)
     qrs_table.grid(row = 4, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
-    qrs_table.heading('initial_x', text = 'Initial X')
-    qrs_table.heading('final_x', text = 'Final X')
+    qrs_table.heading('initial_x', text = 'Initial X', command = make_sort_handler('qrs', 'initial'))
+    qrs_table.heading('final_x', text = 'Final X', command = make_sort_handler('qrs', 'final'))
     qrs_table.heading('frequency', text = 'Period')
-    qrs_table.heading('qrs', text = 'QRS')
+    qrs_table.heading('qrs', text = 'QRS', command = make_sort_handler('qrs', 'duration'))
     qrs_table.heading('uncertainty', text = 'Unc. On (ms)', command = make_sort_handler('qrs', 'uncertainty'))
-    qrs_table.heading('uncertainty_end', text = 'Unc. Off (ms)')
+    qrs_table.heading('uncertainty_end', text = 'Unc. Off (ms)', command = make_sort_handler('qrs', 'uncertainty_end'))
 
     qrs_table.column('initial_x', width = 100, anchor = 'center')
     qrs_table.column('final_x', width = 100, anchor = 'center')
@@ -2014,17 +2028,17 @@ def ecg_marker():
 
     qt_table = ttk.Treeview(frame_right, columns = ('initial_x', 'final_x', 'frequency', 'qt', 'uncertainty'), show = 'headings', height = 5)
     qt_table.grid(row = 6, column = 0, columnspan = 4, padx = 0, pady = 0, ipadx = 0, ipady = 0, sticky = 'ns')
-    qt_table.heading('initial_x', text = 'Initial X')
-    qt_table.heading('final_x', text = 'Final X')
+    qt_table.heading('initial_x', text = 'Initial X', command = make_sort_handler('qt', 'initial'))
+    qt_table.heading('final_x', text = 'Final X', command = make_sort_handler('qt', 'final'))
     qt_table.heading('frequency', text = 'Period')
-    qt_table.heading('qt', text = 'QT')
+    qt_table.heading('qt', text = 'QT', command = make_sort_handler('qt', 'duration'))
     qt_table.heading('uncertainty', text = 'Uncertainty (ms)', command = make_sort_handler('qt', 'uncertainty'))
 
-    qt_table.column('initial_x', width = 100, anchor = 'center')
-    qt_table.column('final_x', width = 100, anchor = 'center')
-    qt_table.column('frequency', width = 100, anchor = 'center')
-    qt_table.column('qt', width = 100, anchor = 'center')
-    qt_table.column('uncertainty', width = 110, anchor = 'center')
+    qt_table.column('initial_x', width = 120, anchor = 'center')
+    qt_table.column('final_x', width = 120, anchor = 'center')
+    qt_table.column('frequency', width = 120, anchor = 'center')
+    qt_table.column('qt', width = 120, anchor = 'center')
+    qt_table.column('uncertainty', width = 120, anchor = 'center')
 
     scrollbar_vertical_qt = tk.Scrollbar(frame_right, orient='vertical', command=qt_table.yview)
     scrollbar_vertical_qt.grid(row=6, column=4, sticky='ns')
@@ -2043,11 +2057,11 @@ def ecg_marker():
     extrasystole_table.heading('duration', text = 'Duration')
     extrasystole_table.heading('uncertainty', text = 'Uncertainty (ms)', command = make_sort_handler('extrasystole', 'uncertainty'))
 
-    extrasystole_table.column('initial_x', width = 100, anchor = 'center')
-    extrasystole_table.column('final_x', width = 100, anchor = 'center')
-    extrasystole_table.column('frequency', width = 100, anchor = 'center')
-    extrasystole_table.column('duration', width = 100, anchor = 'center')
-    extrasystole_table.column('uncertainty', width = 110, anchor = 'center')
+    extrasystole_table.column('initial_x', width = 120, anchor = 'center')
+    extrasystole_table.column('final_x', width = 120, anchor = 'center')
+    extrasystole_table.column('frequency', width = 120, anchor = 'center')
+    extrasystole_table.column('duration', width = 120, anchor = 'center')
+    extrasystole_table.column('uncertainty', width = 120, anchor = 'center')
 
     scrollbar_vertical_extrasystole = tk.Scrollbar(frame_right, orient='vertical', command=extrasystole_table.yview)
     scrollbar_vertical_extrasystole.grid(row=8, column=4, sticky='ns')
@@ -2066,11 +2080,11 @@ def ecg_marker():
     arrhythmia_table.heading('duration', text = 'Duration')
     arrhythmia_table.heading('uncertainty', text = 'Uncertainty (ms)', command = make_sort_handler('arrhythmia', 'uncertainty'))
 
-    arrhythmia_table.column('initial_x', width = 100, anchor = 'center')
-    arrhythmia_table.column('final_x', width = 100, anchor = 'center')
-    arrhythmia_table.column('frequency', width = 100, anchor = 'center')
-    arrhythmia_table.column('duration', width = 100, anchor = 'center')
-    arrhythmia_table.column('uncertainty', width = 110, anchor = 'center')
+    arrhythmia_table.column('initial_x', width = 120, anchor = 'center')
+    arrhythmia_table.column('final_x', width = 120, anchor = 'center')
+    arrhythmia_table.column('frequency', width = 120, anchor = 'center')
+    arrhythmia_table.column('duration', width = 120, anchor = 'center')
+    arrhythmia_table.column('uncertainty', width = 120, anchor = 'center')
 
     scrollbar_vertical_arrhythmia = tk.Scrollbar(frame_right, orient='vertical', command=arrhythmia_table.yview)
     scrollbar_vertical_arrhythmia.grid(row=10, column=4, sticky='ns')

@@ -23,7 +23,9 @@ dependencies = [
   "neurokit2",
   "pillow",
   "scipy",
-  "requests"
+  "requests",
+  "torch",
+  "transformers"
 ]
 
 [project.urls]
