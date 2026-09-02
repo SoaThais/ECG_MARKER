@@ -93,7 +93,7 @@ class Recording:
     @classmethod
     def from_signal(cls, leads, annotations=None, source=None, predict=False,
                      progress_callback=None, noisy_beat_mode='recovery',
-                     ensemble_bundle='4fold'):
+                     ensemble_bundle='4fold', on_batch=None, device=None):
         """Build a Recording from a leads dict already in memory.
 
         Parameters
@@ -158,7 +158,8 @@ class Recording:
         rec.ensemble_bundle = ensemble_bundle
 
         if predict:
-            rec._run_inference(progress_callback=progress_callback)
+            rec._run_inference(progress_callback=progress_callback,
+                                on_batch=on_batch, device=device)
 
         return rec
 
@@ -289,7 +290,7 @@ class Recording:
         cls._get_model(device, ensemble_bundle, path, progress_callback)
         return True
 
-    def _run_inference(self, progress_callback=None):
+    def _run_inference(self, progress_callback=None, on_batch=None, device=None):
         """Run mask-head inference and write qrs_duration / qt_interval back
         into each beat.  Skips noisy beats.
 
@@ -314,11 +315,31 @@ Uses the production ensemble in weights/ (self.ensemble_bundle) -- a
             if progress_callback is not None:
                 progress_callback(stage, i, n)
 
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # device: None/'auto' picks CUDA when present. An explicit 'cuda' is
+        # honoured as asked rather than silently downgraded -- the caller is
+        # usually asking precisely because they want to know whether the GPU
+        # is really being used, and a silent fall back to CPU would answer
+        # that question wrongly.
+        if device is None or device == 'auto':
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            device = torch.device(device)
         ensemble_bundle = getattr(self, 'ensemble_bundle', '4fold')
         ensemble_path = os.path.join(_WEIGHTS_DIR, _ENSEMBLE_BUNDLE_FILES[ensemble_bundle])
         head, model_version, encoder = self._get_model(
             device, ensemble_bundle, ensemble_path, _notify)
+
+        # What actually ran, for the caller to display. Read off the built
+        # object rather than the request: fp16 and compile are both silently
+        # skipped when unsupported (CPU, or a GPU below Triton's compute
+        # capability 7.0), so the request is not evidence of what happened.
+        gpu = torch.cuda.get_device_name(0) if device.type == 'cuda' else None
+        bits = [gpu or str(device), f"K={len(head)}", ensemble_bundle]
+        if getattr(head, 'fp16', False):
+            bits.append('fp16')
+        if getattr(head, 'compiled', False):
+            bits.append('compiled')
+        self.model_info = ' | '.join(bits)
 
         mode = getattr(self, 'noisy_beat_mode', 'recovery')
         if mode == 'exclude':
@@ -414,6 +435,13 @@ Uses the production ensemble in weights/ (self.ensemble_bundle) -- a
                         beat.qrs_end_uncert   = FORCE_MODE_LOW_CONFIDENCE_UNCERTAINTY
 
                 processed += len(batch)
+                # Hand the finished beats over BEFORE reporting progress, so a
+                # UI that draws them has them in hand by the time the counter
+                # moves. Predictions for this batch are already written onto
+                # the Beat objects above; nothing downstream mutates them
+                # again, so passing them out mid-run is safe.
+                if on_batch is not None:
+                    on_batch(self, list(batch))
                 _notify('inference', processed, n_targets)
 
     # ── collections ──────────────────────────────────────────────────────────
