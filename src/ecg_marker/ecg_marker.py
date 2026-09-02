@@ -51,22 +51,46 @@ NOISY_BEAT_MODE_INFO = {
 DEFAULT_NOISY_BEAT_MODE = 'recovery'
 noisy_beat_mode = DEFAULT_NOISY_BEAT_MODE
 
-# Where torch runs inference. 'auto' takes the GPU when torch reports one.
-# 'cuda' is deliberately NOT downgraded to CPU when unavailable -- it raises
-# instead, because the point of choosing it explicitly is to find out whether
-# the GPU is really being used, and a silent fallback answers that wrongly.
-# After each run the status bar reports the device that actually ran, read off
-# the built model rather than off this setting.
+# Where torch runs inference: exactly two choices, no 'auto'. The default is
+# whatever the machine can actually do -- GPU when torch finds one, CPU when it
+# does not -- and the GPU option is greyed out in that second case rather than
+# offered and then failing at run time. There is deliberately no automatic
+# fallback once a box is ticked, so the status line after a run is evidence of
+# what the hardware did rather than of what was requested.
 INFERENCE_DEVICE_INFO = {
-    'auto': ("Auto",
-             "Use the GPU if torch finds one, otherwise the CPU."),
     'cuda': ("GPU (CUDA)",
-             "Force the GPU. Errors out if torch cannot see one, rather than quietly using the CPU."),
+             "Run on the GPU. Roughly 20x faster than CPU over a full recording."),
     'cpu':  ("CPU",
-             "Force the CPU. Much slower, but works anywhere and is the reference for numerics."),
+             "Run on the CPU. Much slower, but works anywhere and is the reference for numerics."),
 }
-DEFAULT_INFERENCE_DEVICE = 'auto'
-inference_device = DEFAULT_INFERENCE_DEVICE
+
+# Probed once, off the UI thread, by the startup pre-warm (see ecg_marker()).
+# None until then; the settings dialog probes on demand if it is opened first.
+_cuda_available = None
+_cuda_name = None
+inference_device = 'cpu'      # replaced by _probe_cuda() before first use
+
+
+def _probe_cuda ():
+    """Ask torch once whether a GPU is usable, and set the default accordingly.
+
+    Importing torch costs seconds, so this runs on the pre-warm thread at
+    startup rather than at import time -- the GUI must not block on it. The
+    answer is cached; the settings dialog calls this itself only if it is
+    opened before the pre-warm got there.
+    """
+    global _cuda_available, _cuda_name, inference_device
+    if _cuda_available is not None:
+        return _cuda_available
+    try:
+        import torch
+        _cuda_available = bool(torch.cuda.is_available())
+        _cuda_name = torch.cuda.get_device_name(0) if _cuda_available else None
+    except Exception:
+        _cuda_available = False
+        _cuda_name = None
+    inference_device = 'cuda' if _cuda_available else 'cpu'
+    return _cuda_available
 
 # Which production QRS ensemble bundle to use (see ecg_nn.recording.ENSEMBLE_BUNDLES
 # for the full contract). Only takes effect if the bundle files are present under
@@ -814,26 +838,32 @@ def open_ecg_nn_settings ():
 
     tk.Label(win, text = "Device", font = ('Arial', 12, 'bold')).pack(anchor = 'w', padx = 12, pady = (16, 4))
 
-    device_var = tk.StringVar(value = inference_device)
-    for value in ('auto', 'cuda', 'cpu'):
-        label, desc = INFERENCE_DEVICE_INFO[value]
-        tk.Radiobutton(win, text = label, variable = device_var, value = value, font = ('Arial', 10)).pack(anchor = 'w', padx = 12, pady = (8, 0))
-        tk.Label(win, text = desc, font = ('Arial', 8), fg = 'gray30', justify = 'left').pack(anchor = 'w', padx = 34)
+    # Probe here only if the startup pre-warm has not already done it (it
+    # normally has, well before anyone opens this dialog). Blocking the UI for
+    # a torch import is acceptable once, in a modal settings window, and it is
+    # the difference between offering a GPU that does not exist and knowing.
+    has_gpu = _probe_cuda()
 
-    # What torch can actually see right now -- answers "did it load the GPU at
-    # all" before running anything. Imported lazily so opening this dialog on a
-    # torch-less machine still works.
-    try:
-        import torch as _t
-        if _t.cuda.is_available():
-            avail = f"torch sees: {_t.cuda.get_device_name(0)} (CUDA {_t.version.cuda})"
-            colour = 'dark green'
-        else:
-            avail = "torch sees: no CUDA device - CPU only"
-            colour = 'dark red'
-    except Exception as _e:
-        avail = f"torch unavailable: {type(_e).__name__}"
-        colour = 'dark red'
+    device_var = tk.StringVar(value = inference_device)
+    for value in ('cuda', 'cpu'):
+        label, desc = INFERENCE_DEVICE_INFO[value]
+        # No GPU -> the option is visible but disabled, so it is obvious the
+        # machine cannot do it, rather than selectable and failing at run time.
+        enabled = has_gpu or value == 'cpu'
+        rb = tk.Radiobutton(win, text = label, variable = device_var, value = value,
+                             font = ('Arial', 10),
+                             state = ('normal' if enabled else 'disabled'))
+        rb.pack(anchor = 'w', padx = 12, pady = (8, 0))
+        tk.Label(win, text = desc, font = ('Arial', 8),
+                  fg = ('gray30' if enabled else 'gray60'),
+                  justify = 'left').pack(anchor = 'w', padx = 34)
+
+    # What torch actually sees -- answers "did it load the GPU at all" before
+    # running anything.
+    if has_gpu:
+        avail, colour = f"torch sees: {_cuda_name}", 'dark green'
+    else:
+        avail, colour = "torch sees no CUDA device - CPU only", 'dark red'
     tk.Label(win, text = avail, font = ('Arial', 8, 'italic'), fg = colour).pack(anchor = 'w', padx = 12, pady = (6, 0))
 
     def apply ():
@@ -911,6 +941,12 @@ def automatic_period_marking ():
 
     def _work():
         try:
+            # Make sure the device default reflects the machine before using
+            # it: if the user clicks before the startup pre-warm has finished
+            # probing, inference_device is still its 'cpu' placeholder and the
+            # run would quietly go to the CPU on a GPU machine. Cached, so this
+            # is free on every call after the first.
+            _probe_cuda()
             rec = _NNRecording.from_signal(
                 leads, predict=True, progress_callback=_on_progress,
                 noisy_beat_mode=noisy_beat_mode, ensemble_bundle=ensemble_bundle,
@@ -2235,8 +2271,11 @@ def ecg_marker():
     # will build the model itself and report any real error properly.
     def _prewarm_model():
         try:
+            # Probe first: this both fixes the default (GPU when present, CPU
+            # otherwise) and warms the cache under the key the run will use.
+            _probe_cuda()
             _NNRecording.prewarm(ensemble_bundle = ensemble_bundle,
-                                  device = None if inference_device == 'auto' else inference_device)
+                                  device = inference_device)
         except Exception as e:
             print(f"[ecg_nn] model pre-warm skipped: {type(e).__name__}: {e}")
 
