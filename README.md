@@ -18,22 +18,6 @@ sudo apt-get install python3-pil.imagetk
 pip install ecg-marker==x.x.x
 ```
 
-### Test Commands
-
-1. Download the test files from the repository: https://github.com/SoaThais/ECG_MARKER/tree/main
-
-2. For unprocessed files
-
-```bash
-python3 python3 -m ecg_marker -i ./input/ -f 0 
-```
-
-3. For processed files 
-
-```bash
-python3 python3 -m ecg_marker  -i ./output/ecg_data.txt -r 0 
-```
-
 ## Install source code on Windows
 
 1. Enable WSL
@@ -115,16 +99,54 @@ conda install -c conda-forge libxcb
 
 ### Test Commands
 
-1. For unprocessed files
+1. Create a configuration file (see [Configuration file](#configuration-file) below) and run:
 
 ```bash
-python3 ./src/ecg_marker/ecg_marker.py  -i ./input/ -f 0 
+python3 ./src/ecg_marker/ecg_marker.py -c ./config.ini
 ```
 
-2. For processed files 
+## Configuration file
 
-```bash
-python3 ./src/ecg_marker/ecg_marker.py  -i ./output/ecg_data.txt -r 0 
+All input, output, and marking settings are now read from a single `.ini`
+configuration file, passed via `-c`. Example:
+
+```ini
+[electrodes]
+# List of all channel (electrode) names expected in the input files
+head_file = ['I', 'II', 'III', 'AVR', 'AVL', 'AVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6', 'HISp', 'HISd', 'VD p', 'VD 78', 'VD 56', 'VD 34', 'VD d']
+# Subset of channels to be processed
+head = ['VD d', 'I', 'II', 'III', 'AVR', 'AVL', 'AVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6']
+
+[data]
+# Input directory or file
+input = ./input/
+# Input File (1) or Input Directory (0)
+input_file = 0
+# Output directory
+output_dir = ./output/
+# Raw Data (1) or Processed Data (0)
+raw_data = 1
+
+[marking]
+# Clean signal (1) or not (0)
+clean_signal = 0
+# Read simulated ECG from MonoAlg3D (1) or real ECG from the electrophysiological study (0)
+ecg_mono = 0
+# Vertical offset between electrode signals in the visualization window
+offset = 1000
+# Uncertainty in marking (ms)
+uncertainty = 15
+```
+
+To reopen a previously saved session instead of raw signal files, point
+`input` at the saved output file and set `raw_data = 0` and `input_file = 1`:
+
+```ini
+[data]
+input = ./output/ecg_data.txt
+input_file = 1
+output_dir = ./output/
+raw_data = 0
 ```
 
 ## Neural automatic marking (ecg_nn)
@@ -163,27 +185,7 @@ If a folder is used as input, name the files in the directory in alphabetical or
 ## Command line arguments
 
 ```bash
-  -h, --help            show this help message and exit
+  -h, --help    show this help message and exit
 
-  -i INPUT              Input
-
-  -f INPUT_FILE         Input File (1) or Input Directory (0)
-
-  -d OUTPUT_DIR         Output Directory
-
-  -o OUTPUT_FILE        Output File
-
-  --qrs_file QRS_FILE   Output file with QRS data
-
-  --qt_file QT_FILE     Output file with QT data
-
-  --vel_file VEL_FILE   Output file with estimated normalized velocity data
-
-  --arrhythmia_file ARRHYTHMIA_FILE Output file with arrhythmia marking
-
-  --extrasystole_file EXTRASYSTOLE_FILE Output file with extrasystole marking
-
-  --apd_file APD_FILE   Output file with estimated APD data
-
-  -r RAW_DATA           Raw Data (1) or not (0)
+  -c CONFIG     Path to the configuration file (required)
 ```
