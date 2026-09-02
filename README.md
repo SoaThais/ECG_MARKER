@@ -175,8 +175,7 @@ models/
 `ecg_nn` uses the production ensemble in `models/production/`. See
 [`models/production/README.md`](models/production/README.md) for the
 ensemble's full input/output contract, golden-test usage, and caveats
-(notably: TF32 must stay disabled on CUDA, and `encoder_sha256` is not yet
-filled in, so HuBERT-encoder compatibility isn't verified automatically).
+(notably: TF32 must stay disabled on CUDA).
 
 ## Note
 
