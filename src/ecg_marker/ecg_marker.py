@@ -51,6 +51,47 @@ NOISY_BEAT_MODE_INFO = {
 DEFAULT_NOISY_BEAT_MODE = 'recovery'
 noisy_beat_mode = DEFAULT_NOISY_BEAT_MODE
 
+# Where torch runs inference: exactly two choices, no 'auto'. The default is
+# whatever the machine can actually do -- GPU when torch finds one, CPU when it
+# does not -- and the GPU option is greyed out in that second case rather than
+# offered and then failing at run time. There is deliberately no automatic
+# fallback once a box is ticked, so the status line after a run is evidence of
+# what the hardware did rather than of what was requested.
+INFERENCE_DEVICE_INFO = {
+    'cuda': ("GPU (CUDA)",
+             "Run on the GPU. Roughly 20x faster than CPU over a full recording."),
+    'cpu':  ("CPU",
+             "Run on the CPU. Much slower, but works anywhere and is the reference for numerics."),
+}
+
+# Probed once, off the UI thread, by the startup pre-warm (see ecg_marker()).
+# None until then; the settings dialog probes on demand if it is opened first.
+_cuda_available = None
+_cuda_name = None
+inference_device = 'cpu'      # replaced by _probe_cuda() before first use
+
+
+def _probe_cuda ():
+    """Ask torch once whether a GPU is usable, and set the default accordingly.
+
+    Importing torch costs seconds, so this runs on the pre-warm thread at
+    startup rather than at import time -- the GUI must not block on it. The
+    answer is cached; the settings dialog calls this itself only if it is
+    opened before the pre-warm got there.
+    """
+    global _cuda_available, _cuda_name, inference_device
+    if _cuda_available is not None:
+        return _cuda_available
+    try:
+        import torch
+        _cuda_available = bool(torch.cuda.is_available())
+        _cuda_name = torch.cuda.get_device_name(0) if _cuda_available else None
+    except Exception:
+        _cuda_available = False
+        _cuda_name = None
+    inference_device = 'cuda' if _cuda_available else 'cpu'
+    return _cuda_available
+
 # Which production QRS ensemble bundle to use (see ecg_nn.recording.ENSEMBLE_BUNDLES
 # for the full contract). Only takes effect if the bundle files are present under
 # models/production/ -- otherwise ecg_nn falls back to the single mid-training checkpoint.
@@ -774,7 +815,7 @@ def open_ecg_nn_settings ():
     # em `noisy_beat_mode` / `ensemble_bundle` (globais) e são lidos por
     # automatic_period_marking() a cada execução.
 
-    global noisy_beat_mode, ensemble_bundle
+    global noisy_beat_mode, ensemble_bundle, inference_device
 
     win = tk.Toplevel(janela)
     win.title("ecg_nn Settings")
@@ -795,11 +836,42 @@ def open_ecg_nn_settings ():
         tk.Radiobutton(win, text = label, variable = bundle_var, value = value, font = ('Arial', 10)).pack(anchor = 'w', padx = 12, pady = (8, 0))
         tk.Label(win, text = desc, font = ('Arial', 8), fg = 'gray30', justify = 'left').pack(anchor = 'w', padx = 34)
 
+    tk.Label(win, text = "Device", font = ('Arial', 12, 'bold')).pack(anchor = 'w', padx = 12, pady = (16, 4))
+
+    # Probe here only if the startup pre-warm has not already done it (it
+    # normally has, well before anyone opens this dialog). Blocking the UI for
+    # a torch import is acceptable once, in a modal settings window, and it is
+    # the difference between offering a GPU that does not exist and knowing.
+    has_gpu = _probe_cuda()
+
+    device_var = tk.StringVar(value = inference_device)
+    for value in ('cuda', 'cpu'):
+        label, desc = INFERENCE_DEVICE_INFO[value]
+        # No GPU -> the option is visible but disabled, so it is obvious the
+        # machine cannot do it, rather than selectable and failing at run time.
+        enabled = has_gpu or value == 'cpu'
+        rb = tk.Radiobutton(win, text = label, variable = device_var, value = value,
+                             font = ('Arial', 10),
+                             state = ('normal' if enabled else 'disabled'))
+        rb.pack(anchor = 'w', padx = 12, pady = (8, 0))
+        tk.Label(win, text = desc, font = ('Arial', 8),
+                  fg = ('gray30' if enabled else 'gray60'),
+                  justify = 'left').pack(anchor = 'w', padx = 34)
+
+    # What torch actually sees -- answers "did it load the GPU at all" before
+    # running anything.
+    if has_gpu:
+        avail, colour = f"torch sees: {_cuda_name}", 'dark green'
+    else:
+        avail, colour = "torch sees no CUDA device - CPU only", 'dark red'
+    tk.Label(win, text = avail, font = ('Arial', 8, 'italic'), fg = colour).pack(anchor = 'w', padx = 12, pady = (6, 0))
+
     def apply ():
-        global noisy_beat_mode, ensemble_bundle
+        global noisy_beat_mode, ensemble_bundle, inference_device
         noisy_beat_mode = mode_var.get()
         ensemble_bundle = bundle_var.get()
-        message_label.config(text = f"Noisy-beat mode: {noisy_beat_mode}, model: {ensemble_bundle}")
+        inference_device = device_var.get()
+        message_label.config(text = f"Noisy-beat mode: {noisy_beat_mode}, model: {ensemble_bundle}, device: {inference_device}")
         win.destroy()
 
     tk.Button(win, text = "Apply", command = apply).pack(pady = 14)
@@ -857,14 +929,28 @@ def automatic_period_marking ():
     # and every widget touch happens in _poll() below, on the main thread.
     result_queue = queue.Queue()
 
+    _rendered_beat_ids.clear()      # fresh run: nothing drawn yet
+
     def _on_progress(stage, i, n):
         result_queue.put(('progress', stage, i, n))     # worker thread
 
+    def _on_batch(rec, batch):
+        # Worker thread. Hand the finished beats to the main thread so their
+        # QRS marks appear as soon as their batch lands, instead of the tables
+        # staying empty until the whole recording is done.
+        result_queue.put(('partial', rec, batch))
+
     def _work():
         try:
+            # Backstop only: the button is disabled until the pre-warm has
+            # probed, so this should already be cached and free. Kept because
+            # the cost is a dict check and the failure it prevents -- running
+            # on the CPU of a GPU machine -- is silent.
+            _probe_cuda()
             rec = _NNRecording.from_signal(
                 leads, predict=True, progress_callback=_on_progress,
-                noisy_beat_mode=noisy_beat_mode, ensemble_bundle=ensemble_bundle)
+                noisy_beat_mode=noisy_beat_mode, ensemble_bundle=ensemble_bundle,
+                on_batch=_on_batch, device=inference_device)
             result_queue.put(('done', rec))
         except Exception as e:
             import traceback
@@ -893,7 +979,12 @@ def automatic_period_marking ():
                             progress_bar['mode'] = 'determinate'
                         progress_bar['maximum'] = max(n, 1)
                         progress_bar['value'] = i
-                        message_label.config(text = f"Running neural QRS detection: {i}/{n} beats")
+                        message_label.config(
+                            text = f"Running neural QRS detection: {i}/{n} beats "
+                                    f"({len(_rendered_beat_ids)} marked)")
+                elif msg[0] == 'partial':
+                    _, rec, batch = msg
+                    _render_beats(rec, batch)
                 elif msg[0] == 'error':
                     _, e, tb = msg
                     print(tb)
@@ -911,24 +1002,35 @@ def automatic_period_marking ():
     threading.Thread(target = _work, daemon = True).start()
     message_label.after(50, _poll)
 
+# Beats already drawn into the tables during this run, by id(). Rendering is
+# incremental (a batch at a time, see _poll), so this is what keeps the final
+# sweep from duplicating rows the batches already produced.
+_rendered_beat_ids = set()
 
-def _apply_results (rec):
-    """Turn a finished Recording into Period/QRS table rows.
+def _render_beats (rec, subset):
+    """Append table rows for any beat in `subset` not yet drawn. Returns the
+    number newly marked.
 
-    Split out of automatic_period_marking() when inference moved to a worker
-    thread: this half must run on the Tk main thread, and is reached from
-    _poll() rather than falling through from the call above.
+    Single renderer for both paths -- the incremental one (a batch just
+    finished) and the final sweep -- because two of them would drift and the
+    tables would disagree depending on batch boundaries.
+
+    Rows are APPENDED to the Treeviews rather than clearing and rebuilding
+    them: that is what makes partial results visible while inference is still
+    running, and it also leaves any manually-placed marks alone.
     """
-    # 'force' mode means every beat, including ones flagged noisy (window
-    # overlaps a neighbor), should show up in the marking tables -- 'recovery'
-    # and 'exclude' both still want noisy beats kept out (see
-    # open_ecg_nn_settings / NOISY_BEAT_MODE_INFO).
     skip_noisy = noisy_beat_mode != 'force'
-
     beats = rec.beats
+    index_of = {id(b): i for i, b in enumerate(beats)}
     n_marked = 0
-    for i, beat in enumerate(beats):
+
+    for beat in subset:
+        if id(beat) in _rendered_beat_ids:
+            continue
         if (skip_noisy and beat.noisy) or beat.qrs_start is None or beat.qrs_duration is None:
+            continue
+        i = index_of.get(id(beat))
+        if i is None:
             continue
 
         # Period (RR) has no model output backing it -- it's pure spike-to-spike
@@ -936,12 +1038,11 @@ def _apply_results (rec):
         period_uncertainty = f"{uncertainty_value:.2f}"
 
         # QRS uncertainty: ecg_nn already derives real per-beat onset/offset
-        # values and stores them on the beat -- use them instead of the
-        # config constant. The ensemble is purely parametric: these ARE
-        # tau_on/tau_off, its own learned uncertainty, read straight from the
-        # model (no mask involved). Falls back to the config value only if
-        # they are missing. Kept genuinely separate (not averaged/maxed into
-        # one number) -- see TABLE_FIELD_CONFIG['qrs'].
+        # values and stores them on the beat -- use them instead of the config
+        # constant. The ensemble is purely parametric: these ARE tau_on/tau_off,
+        # its own learned uncertainty, read straight from the model. Falls back
+        # to the config value only if they are missing. Kept genuinely separate
+        # (not averaged/maxed into one number) -- see TABLE_FIELD_CONFIG['qrs'].
         if beat.qrs_start_uncert is not None:
             qrs_uncertainty_on = f"{beat.qrs_start_uncert:.2f}"
         else:
@@ -957,37 +1058,49 @@ def _apply_results (rec):
             initial_x = f"{(beat.spike_idx - beat.bcl):.2f}"
             final_x   = f"{beat.spike_idx:.2f}"
 
-            # Índice que a marcação de Período recém-criada terá em janela.freq —
-            # usado para vincular (via freq_ref) a marcação de QRS a ela.
+            # Index the new Period row will have in janela.freq -- used to link
+            # (via freq_ref) the QRS row to it.
             freq_idx = len(janela.freq)
-            janela.freq.append((initial_x, final_x, interval, period_uncertainty, initial_x, final_x))
+            row = (initial_x, final_x, interval, period_uncertainty, initial_x, final_x)
+            janela.freq.append(row)
+            freq_table.insert("", tk.END, values = row)
         else:
             # First beat: no predecessor, so no RR interval to anchor a Period
-            # row to. Still emit its QRS mark (v6 gave it a real prediction) --
-            # borrow the following beat's RR as a display estimate for the
-            # 'frequency' column, same as a manually-typed, unlinked period.
+            # row to. Still emit its QRS mark -- borrow the following beat's RR
+            # as a display estimate, same as a manually-typed, unlinked period.
+            # bcl comes from compute_bcl(), which runs before inference, so the
+            # neighbour's value is available even while later batches are still
+            # being predicted.
             freq_idx = None
             interval = f"{beats[i + 1].bcl:.2f}" if (i + 1 < len(beats) and beats[i + 1].bcl is not None) else "0.00"
 
         qrs_start = f"{beat.qrs_start:.2f}"
         qrs_end   = f"{(beat.qrs_start + beat.qrs_duration):.2f}"
         qrs_dur   = f"{beat.qrs_duration:.2f}"
-        janela.qrs.append((qrs_start, qrs_end, interval, qrs_dur, qrs_uncertainty_on,
-                            qrs_start, qrs_end, freq_idx, qrs_uncertainty_off))
 
+        qrs_row = (qrs_start, qrs_end, interval, qrs_dur, qrs_uncertainty_on,
+                    qrs_start, qrs_end, freq_idx, qrs_uncertainty_off)
+        janela.qrs.append(qrs_row)
+        qrs_table.insert("", tk.END, values = qrs_row)
+
+        _rendered_beat_ids.add(id(beat))
         n_marked += 1
 
-    for i in freq_table.get_children():
-        freq_table.delete(i)
-    for f in janela.freq:
-        freq_table.insert("", tk.END, values = f)
+    return n_marked
 
-    for i in qrs_table.get_children():
-        qrs_table.delete(i)
-    for q in janela.qrs:
-        qrs_table.insert("", tk.END, values = q)
+def _apply_results (rec):
+    """Final sweep once inference finishes.
 
-    message_label.config(text = f"Automatic Markings Completed ({n_marked} beats).")
+    Most beats are already on screen -- they were drawn as their batch
+    completed. This catches anything the incremental path did not cover and
+    reports what the model actually ran on.
+    """
+    _render_beats(rec, rec.beats)
+    n_total = len(_rendered_beat_ids)
+
+    info = getattr(rec, 'model_info', None)
+    where = f" [{info}]" if info else ""
+    message_label.config(text = f"Automatic Markings Completed ({n_total} beats).{where}")
     message_label.update_idletasks()
 
 def key_press (event):
@@ -1958,7 +2071,13 @@ def ecg_marker():
     frame_right.rowconfigure(10, weight = 3)
     frame_right.rowconfigure(11, weight = 1)
 
-    auto_mark_button = tk.Button(frame_right, text='Automatic Marking', command = automatic_period_marking)
+    # Starts DISABLED and is enabled by the pre-warm thread once torch has been
+    # probed and the model is cached. Until that probe finishes the device is
+    # not yet known, and a click landing in that window would have run on the
+    # CPU of a GPU machine -- so the fix is to make the button unavailable
+    # rather than to guess a default.
+    auto_mark_button = tk.Button(frame_right, text='Automatic Marking (loading model...)',
+                                  command = automatic_period_marking, state = tk.DISABLED)
     auto_mark_button.grid(row = 0, column = 2, columnspan = 4, padx = 20, pady = 10, ipadx = 20)
 
     freq_name = tk.Label(frame_right, text = "Period", font = ('Arial', 16))
@@ -2153,11 +2272,36 @@ def ecg_marker():
     # exit. Failures are deliberately swallowed to a console note: a warm-up
     # is an optimization, and if it cannot run, the normal inference path
     # will build the model itself and report any real error properly.
+
+    def _prewarm_ready():
+        # Main thread (reached via after()): Tk is not thread-safe.
+        #
+        # Deliberately does NOT write to message_label. The status bar belongs
+        # to whatever the user is doing -- marking, file operations, key hints
+        # -- and a model notice arriving there ~20s after launch would stomp on
+        # it for something the user never asked about. The button's own label
+        # carries the state instead, right where the click would go, and the
+        # device actually used is reported at the END of a run (see
+        # _apply_results), which is when it is evidence rather than noise.
+        auto_mark_button['state'] = tk.NORMAL
+        auto_mark_button['text'] = 'Automatic Marking'
+
     def _prewarm_model():
+        # Probe first: this both fixes the device default (GPU when present,
+        # CPU otherwise) and warms the cache under the key the run will use.
+        _probe_cuda()
         try:
-            _NNRecording.prewarm(ensemble_bundle = ensemble_bundle)
+            _NNRecording.prewarm(ensemble_bundle = ensemble_bundle,
+                                  device = inference_device)
+            print(f"[ecg_nn] model ready on {inference_device}"
+                  f" ({_cuda_name or 'cpu'}), bundle: {ensemble_bundle}")
         except Exception as e:
-            print(f"[ecg_nn] model pre-warm skipped: {type(e).__name__}: {e}")
+            # A failed warm-up is not fatal -- the normal inference path
+            # rebuilds and reports real errors properly -- so the button still
+            # becomes available; the first run just pays the load. Reported on
+            # the console, not in the UI, for the same reason as above.
+            print(f"[ecg_nn] model pre-warm failed: {type(e).__name__}: {e}")
+        janela.after(0, _prewarm_ready)
 
     threading.Thread(target = _prewarm_model, daemon = True).start()
 
